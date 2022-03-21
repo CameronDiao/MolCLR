@@ -75,6 +75,8 @@ class GINet(nn.Module):
         nn.init.xavier_uniform_(self.x_embedding1.weight.data)
         nn.init.xavier_uniform_(self.x_embedding2.weight.data)
         
+        self.label_embedding = nn.Embedding(2, feat_dim)
+
         # List of MLPs
         self.gnns = nn.ModuleList()
         for layer in range(num_layer):
@@ -93,16 +95,16 @@ class GINet(nn.Module):
             self.pool = global_add_pool
 
         self.feat_lin = nn.Linear(self.emb_dim, self.feat_dim)
-        if self.task == 'classification':
-            out_dim = 2
-        elif self.task == 'regression':
-            out_dim = 1
-        
+        out_dim = 1
+      
+        self.label_lin = nn.Linear(self.feat_dim, self.feat_dim)
+        nn.init.xavier_uniform_(self.label_lin.weight)
+
         self.pred_n_layer = max(1, pred_n_layer)
 
         if pred_act == 'relu':
             pred_head = [
-                nn.Linear(self.feat_dim, self.feat_dim//2), 
+                nn.Linear(2 * self.feat_dim, self.feat_dim//2), 
                 nn.ReLU(inplace=True)
             ]
             for _ in range(self.pred_n_layer - 1):
@@ -112,7 +114,7 @@ class GINet(nn.Module):
                 ])
         elif pred_act == 'softplus':
             pred_head = [
-                nn.Linear(self.feat_dim, self.feat_dim//2), 
+                nn.Linear(2 * self.feat_dim, self.feat_dim//2), 
                 nn.Softplus()
             ]
             for _ in range(self.pred_n_layer - 1):
@@ -126,11 +128,15 @@ class GINet(nn.Module):
         pred_head.append(nn.Linear(self.feat_dim//2, out_dim))
         self.pred_head = nn.Sequential(*pred_head)
 
-    def forward(self, data):
+    def init_label_emb(self, init):
+        with torch.no_grad():
+            self.label_embedding.weight = nn.Parameter(init)
+
+    def forward(self, data, device):
         x = data.x
         edge_index = data.edge_index
         edge_attr = data.edge_attr
-        
+       
         h = self.x_embedding1(x[:,0]) + self.x_embedding2(x[:,1])
 
         for layer in range(self.num_layer):
@@ -143,8 +149,17 @@ class GINet(nn.Module):
 
         h = self.pool(h, data.batch)
         h = self.feat_lin(h)
-        
-        return h, self.pred_head(h)
+        h1 = torch.squeeze(self.label_embedding(torch.zeros(h.shape[0]).type(torch.LongTensor).to(device)))
+        h1 = self.label_lin(h1)
+        h2 = torch.squeeze(self.label_embedding(torch.ones(h.shape[0]).type(torch.LongTensor).to(device)))
+        h2 = self.label_lin(h2)
+
+        h1 = torch.cat((h, h1), dim=1)
+        h2 = torch.cat((h, h2), dim=1)
+
+        p = torch.cat((self.pred_head(h1), self.pred_head(h2)), dim=1)
+
+        return h, p
 
     def load_my_state_dict(self, state_dict):
         own_state = self.state_dict()

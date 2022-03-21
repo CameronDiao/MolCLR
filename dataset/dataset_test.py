@@ -3,6 +3,7 @@ import csv
 import math
 import time
 import random
+import copy
 import numpy as np
 
 import torch
@@ -17,6 +18,7 @@ from rdkit import Chem
 from rdkit.Chem.rdchem import HybridizationType
 from rdkit.Chem.rdchem import BondType as BT
 from rdkit.Chem import AllChem
+from rdkit.Chem import BRICS
 from rdkit.Chem.Scaffolds.MurckoScaffold import MurckoScaffoldSmiles
 from rdkit import RDLogger                                                                                                                                                               
 RDLogger.DisableLog('rdApp.*')  
@@ -109,6 +111,86 @@ def read_smiles(data_path, target, task):
     print(len(smiles_data))
     return smiles_data, labels
 
+def brics_decomp(mol):
+    n_atoms = mol.GetNumAtoms()
+    if n_atoms == 1:
+        return [[0]], []
+
+    cliques = []
+    breaks = []
+    for bond in mol.GetBonds():
+        a1 = bond.GetBeginAtom().GetIdx()
+        a2 = bond.GetEndAtom().GetIdx()
+        cliques.append([a1, a2])
+
+    res = list(BRICS.FindBRICSBonds(mol))
+    if len(res) == 0:
+        return [list(range(n_atoms))], []
+    else:
+        for bond in res:
+            if [bond[0][0], bond[0][1]] in cliques:
+                cliques.remove([bond[0][0], bond[0][1]])
+            else:
+                cliques.remove([bond[0][1], bond[0][0]])
+            cliques.append([bond[0][0]])
+            cliques.append([bond[0][1]])
+
+    # break bonds between rings and non-ring atoms
+    for c in cliques:
+        if len(c) > 1:
+            if mol.GetAtomWithIdx(c[0]).IsInRing() and not mol.GetAtomWithIdx(c[1]).IsInRing():
+                cliques.remove(c)
+                cliques.append([c[1]])
+                breaks.append(c)
+            if mol.GetAtomWithIdx(c[1]).IsInRing() and not mol.GetAtomWithIdx(c[0]).IsInRing():
+                cliques.remove(c)
+                cliques.append([c[0]])
+                breaks.append(c)
+
+    # select atoms at intersections as motif
+    for atom in mol.GetAtoms():
+        if len(atom.GetNeighbors()) > 2 and not atom.IsInRing():
+            cliques.append([atom.GetIdx()])
+            for nei in atom.GetNeighbors():
+                if [nei.GetIdx(), atom.GetIdx()] in cliques:
+                    cliques.remove([nei.GetIdx(), atom.GetIdx()])
+                    breaks.append([nei.GetIdx(), atom.GetIdx()])
+                elif [atom.GetIdx(), nei.GetIdx()] in cliques:
+                    cliques.remove([atom.GetIdx(), nei.GetIdx()])
+                    breaks.append([atom.GetIdx(), nei.GetIdx()])
+                cliques.append([nei.GetIdx()])
+
+    # merge cliques
+    for c in range(len(cliques) - 1):
+        if c >= len(cliques):
+            break
+        for k in range(c + 1, len(cliques)):
+            if k >= len(cliques):
+                break
+            if len(set(cliques[c]) & set(cliques[k])) > 0:
+                cliques[c] = list(set(cliques[c]) | set(cliques[k]))
+                cliques[k] = []
+        cliques = [c for c in cliques if len(c) > 0]
+    cliques = [c for c in cliques if len(c) > 0]
+
+    # edges
+    edges = []
+    for bond in res:
+        for c in range(len(cliques)):
+            if bond[0][0] in cliques[c]:
+                c1 = c
+            if bond[0][1] in cliques[c]:
+                c2 = c
+        edges.append((c1, c2))
+    for bond in breaks:
+        for c in range(len(cliques)):
+            if bond[0] in cliques[c]:
+                c1 = c
+            if bond[1] in cliques[c]:
+                c2 = c
+        edges.append((c1, c2))
+
+    return cliques, edges
 
 class MolTestDataset(Dataset):
     def __init__(self, data_path, target, task):
@@ -135,7 +217,7 @@ class MolTestDataset(Dataset):
             type_idx.append(ATOM_LIST.index(atom.GetAtomicNum()))
             chirality_idx.append(CHIRALITY_LIST.index(atom.GetChiralTag()))
             atomic_number.append(atom.GetAtomicNum())
-
+    
         x1 = torch.tensor(type_idx, dtype=torch.long).view(-1,1)
         x2 = torch.tensor(chirality_idx, dtype=torch.long).view(-1,1)
         x = torch.cat([x1, x2], dim=-1)
@@ -161,6 +243,7 @@ class MolTestDataset(Dataset):
         elif self.task == 'regression':
             y = torch.tensor(self.labels[index] * self.conversion, dtype=torch.float).view(1,-1)
         data = Data(x=x, y=y, edge_index=edge_index, edge_attr=edge_attr)
+        #data.mol_index = index
         return data
 
     def __len__(self):

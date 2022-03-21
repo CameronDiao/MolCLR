@@ -86,11 +86,11 @@ class FineTune(object):
 
     def _step(self, model, data, n_iter):
         # get the prediction
-        __, pred = model(data)  # [N,C]
-
+        __, pred = model(data, self.device)
         if self.config['dataset']['task'] == 'classification':
             loss = self.criterion(pred, data.y.flatten())
         elif self.config['dataset']['task'] == 'regression':
+            __, pred = model(data)
             if self.normalizer:
                 loss = self.criterion(pred, self.normalizer.norm(data.y))
             else:
@@ -101,7 +101,18 @@ class FineTune(object):
     def train(self):
         train_loader, valid_loader, test_loader = self.dataset.get_data_loaders()
 
+        #clique_path = "./" + self.config["task_name"] + "/clique.txt"
+        #clique_list = []
+        #if os.path.exists(clique_path):
+        #    with open(clique_path, "r") as f:
+        #        for line in f.readlines():
+        #            line = line.strip('\n')
+        #            clique_list.append(line)
+        #else:
+        #    
+
         self.normalizer = None
+        
         if self.config["task_name"] in ['qm7', 'qm9']:
             labels = []
             for d, __ in train_loader:
@@ -114,6 +125,27 @@ class FineTune(object):
             from models.ginet_finetune import GINet
             model = GINet(self.config['dataset']['task'], **self.config["model"]).to(self.device)
             model = self._load_pre_trained_weights(model)
+            
+
+            feats = []
+            labels = []
+            for d in train_loader:
+                d = d.to(self.device)
+                emb, __ = model(d)
+                feats.append(emb)
+                labels.append(d.y)
+            feats = torch.cat(feats)
+            labels = torch.cat(labels)
+            
+            init1 = torch.mean(feats[torch.nonzero(labels == 0)[:, 0]], dim=0)
+            init2 = torch.mean(feats[torch.nonzero(labels == 1)[:, 0]], dim=0)
+
+            init = torch.vstack((init1, init2)).to(self.device)
+
+            from models.ginet_finetune_link import GINet
+            model = GINet(self.config['dataset']['task'], **self.config["model"]).to(self.device)
+            model = self._load_pre_trained_weights(model)
+            model.init_label_emb(init)
         elif self.config['model_type'] == 'gcn':
             from models.gcn_finetune import GCN
             model = GCN(self.config['dataset']['task'], **self.config["model"]).to(self.device)
@@ -121,8 +153,8 @@ class FineTune(object):
 
         layer_list = []
         for name, param in model.named_parameters():
+            print(name, param.requires_grad)            
             if 'pred_lin' in name:
-                print(name, param.requires_grad)
                 layer_list.append(name)
 
         params = list(map(lambda x: x[1],list(filter(lambda kv: kv[0] in layer_list, model.named_parameters()))))
@@ -212,7 +244,7 @@ class FineTune(object):
             for bn, data in enumerate(valid_loader):
                 data = data.to(self.device)
 
-                __, pred = model(data)
+                __, pred = model(data, self.device)
                 loss = self._step(model, data, bn)
 
                 valid_loss += loss.item() * data.y.size(0)
@@ -268,7 +300,7 @@ class FineTune(object):
             for bn, data in enumerate(test_loader):
                 data = data.to(self.device)
 
-                __, pred = model(data)
+                __, pred = model(data, self.device)
                 loss = self._step(model, data, bn)
 
                 test_loss += loss.item() * data.y.size(0)
