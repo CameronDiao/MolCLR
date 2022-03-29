@@ -162,7 +162,7 @@ class MolTestDataset(Dataset):
         elif self.task == 'regression':
             y = torch.tensor(self.labels[index] * self.conversion, dtype=torch.float).view(1,-1)
         data = Data(x=x, y=y, edge_index=edge_index, edge_attr=edge_attr)
-        #data.mol_index = index
+        data.mol_index = index
         return data
 
     def __len__(self):
@@ -184,14 +184,12 @@ class MolTestDatasetWrapper(object):
         self.target = target
         self.task = task
         self.splitting = splitting
-        self.smiles_data = None
         assert splitting in ['random', 'scaffold']
 
     def get_data_loaders(self):
         train_dataset = MolTestDataset(data_path=self.data_path, target=self.target, task=self.task)
-        self.smiles_data = train_dataset.smiles_data
         train_loader, valid_loader, test_loader = self.get_train_validation_data_loaders(train_dataset)
-        return train_loader, valid_loader, test_loader
+        return train_dataset.smiles_data, train_loader, valid_loader, test_loader
 
     def get_train_validation_data_loaders(self, train_dataset):
         if self.splitting == 'random':

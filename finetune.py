@@ -9,11 +9,14 @@ from datetime import datetime
 import torch
 from torch import nn
 import torch.nn.functional as F
+#from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from sklearn.metrics import roc_auc_score, mean_squared_error, mean_absolute_error
 
 from dataset.dataset_test import MolTestDatasetWrapper
+from dataset.dataset_clique import MolCliqueDatasetWrapper
+#from dataset.dataset_clique import MolCliqueDataset
 from utils.clique import get_mol, get_smiles, sanitize, get_clique_mol, brics_decomp
 
 apex_support = False
@@ -31,7 +34,6 @@ def _save_config_file(model_checkpoints_folder):
     if not os.path.exists(model_checkpoints_folder):
         os.makedirs(model_checkpoints_folder)
         shutil.copy('./config_finetune.yaml', os.path.join(model_checkpoints_folder, 'config_finetune.yaml'))
-
 
 class Normalizer(object):
     """Normalize a Tensor and restore it later. """
@@ -84,9 +86,10 @@ class FineTune(object):
 
         return device
 
-    def _step(self, model, data, n_iter):
+    def _step(self, model, data, n_iter, mol_idx, clique_idx):
+        
         # get the prediction
-        __, pred = model(data, self.device)
+        __, pred = model(data, mol_idx, clique_idx)
         if self.config['dataset']['task'] == 'classification':
             loss = self.criterion(pred, data.y.flatten())
         elif self.config['dataset']['task'] == 'regression':
@@ -98,27 +101,38 @@ class FineTune(object):
 
         return loss
 
-    def _gen_cliques(self):
-        #mol_to_clique = {}
+    def _gen_cliques(self, smiles_data):
+        mol_to_clique = {}
         clique_set = set()
-        for i, m in enumerate(self.dataset.smiles_data):
+        for i, m in enumerate(smiles_data):
+            mol_to_clique[i] = {}
             mol = get_mol(m)
-            cliques, edges = brics_decomp(mol)
+            cliques, __  = brics_decomp(mol)
             for c in cliques:
                 cmol = get_clique_mol(mol, c)
-                #mol_to_clique[i] = get_smiles(cmol)
-                clique_set.add(get_smiles(cmol))
-        print(len(clique_set))
-        print(len(set(mol_to_clique.values())))
-        return mol_to_clique
+                cs = get_smiles(cmol)
+                clique_set.add(cs)
+                if cs not in mol_to_clique[i]:
+                    mol_to_clique[i][cs] = 1
+                else:
+                    mol_to_clique[i][cs] += 1
+        return list(clique_set), mol_to_clique
+
 
     def train(self):
-        train_loader, valid_loader, test_loader = self.dataset.get_data_loaders()
+        smiles_data, train_loader, valid_loader, test_loader = self.dataset.get_data_loaders()
 
-        mol_to_clique = self._gen_cliques()
+        clique_list, mol_to_clique = self._gen_cliques(smiles_data)
+        num_motifs = len(clique_list)
+
+        #clique_dataset = MolCliqueDataset(clique_list)
+        #clique_loader = DataLoader(clique_dataset, batch_size=self.config['batch_size'], num_workers=self.config['dataset']['num_workers'])
+
+        clique_dataset = MolCliqueDatasetWrapper(clique_list, self.config['batch_size'], self.config['dataset']['num_workers'])
+        clique_loader = clique_dataset.get_data_loaders()
 
         self.normalizer = None
-        
+      
         if self.config["task_name"] in ['qm7', 'qm9']:
             labels = []
             for d, __ in train_loader:
@@ -132,28 +146,19 @@ class FineTune(object):
             model = GINet(self.config['dataset']['task'], **self.config["model"]).to(self.device)
             model = self._load_pre_trained_weights(model)
             
-
             feats = []
-            labels = []
-            for d in train_loader:
-                d = d.to(self.device)
-                emb, __ = model(d)
+            for c in clique_loader:
+                c = c.to(self.device)
+                emb, __ = model(c)
                 feats.append(emb)
-                labels.append(d.y)
             
-            with torch.no_grad():
+            with torch.no_grad():               
                 feats = torch.cat(feats)
-                labels = torch.cat(labels)
 
-                init1 = torch.mean(feats[torch.nonzero(labels == 0)[:, 0]], dim=0)
-                init2 = torch.mean(feats[torch.nonzero(labels == 1)[:, 0]], dim=0)
-
-                init = torch.vstack((init1, init2)).to(self.device)
-
-            from models.ginet_finetune_link import GINet
-            model = GINet(self.config['dataset']['task'], **self.config["model"]).to(self.device)
+            from models.ginet_finetune_mp import GINet
+            model = GINet(num_motifs, self.config['dataset']['task'], **self.config["model"]).to(self.device)
             model = self._load_pre_trained_weights(model)
-            model.init_label_emb(init)
+            model.init_motif_emb(feats)
         elif self.config['model_type'] == 'gcn':
             from models.gcn_finetune import GCN
             model = GCN(self.config['dataset']['task'], **self.config["model"]).to(self.device)
@@ -161,7 +166,6 @@ class FineTune(object):
 
         layer_list = []
         for name, param in model.named_parameters():
-            print(name, param.requires_grad)            
             if 'pred_lin' in name:
                 layer_list.append(name)
 
@@ -194,7 +198,19 @@ class FineTune(object):
                 optimizer.zero_grad()
 
                 data = data.to(self.device)
-                loss = self._step(model, data, n_iter)
+               
+                mol_idx = []
+                clique_idx = []
+                ct = 0
+                for d in data.to_data_list():
+                    for clique in mol_to_clique[d.mol_index.item()].keys():
+                        mol_idx.extend([ct for i in range(mol_to_clique[d.mol_index.item()][clique])])
+                        clique_idx.extend([clique_list.index(clique) for i in range(mol_to_clique[d.mol_index.item()][clique])])
+                    ct += 1
+                mol_idx = torch.tensor(mol_idx).to(self.device)
+                clique_idx = torch.tensor(clique_idx).to(self.device)
+                
+                loss = self._step(model, data, n_iter, mol_idx, clique_idx)
 
                 if n_iter % self.config['log_every_n_steps'] == 0:
                     self.writer.add_scalar('train_loss', loss, global_step=n_iter)
@@ -212,13 +228,13 @@ class FineTune(object):
             # validate the model if requested
             if epoch_counter % self.config['eval_every_n_epochs'] == 0:
                 if self.config['dataset']['task'] == 'classification': 
-                    valid_loss, valid_cls = self._validate(model, valid_loader)
+                    valid_loss, valid_cls = self._validate(model, valid_loader, clique_list, mol_to_clique)
                     if valid_cls > best_valid_cls:
                         # save the model weights
                         best_valid_cls = valid_cls
                         torch.save(model.state_dict(), os.path.join(model_checkpoints_folder, 'model.pth'))
                 elif self.config['dataset']['task'] == 'regression': 
-                    valid_loss, valid_rgr = self._validate(model, valid_loader)
+                    valid_loss, valid_rgr = self._validate(model, valid_loader, clique_list, mol_to_clique)
                     if valid_rgr < best_valid_rgr:
                         # save the model weights
                         best_valid_rgr = valid_rgr
@@ -227,7 +243,7 @@ class FineTune(object):
                 self.writer.add_scalar('validation_loss', valid_loss, global_step=valid_n_iter)
                 valid_n_iter += 1
         
-        self._test(model, test_loader)
+        self._test(model, test_loader, clique_list, mol_to_clique)
 
     def _load_pre_trained_weights(self, model):
         try:
@@ -241,7 +257,7 @@ class FineTune(object):
 
         return model
 
-    def _validate(self, model, valid_loader):
+    def _validate(self, model, valid_loader, clique_list, mol_to_clique):
         predictions = []
         labels = []
         with torch.no_grad():
@@ -252,8 +268,19 @@ class FineTune(object):
             for bn, data in enumerate(valid_loader):
                 data = data.to(self.device)
 
-                __, pred = model(data, self.device)
-                loss = self._step(model, data, bn)
+                mol_idx = []
+                clique_idx = []
+                ct = 0
+                for d in data.to_data_list():
+                    for clique in mol_to_clique[d.mol_index.item()].keys():
+                        mol_idx.extend([ct for i in range(mol_to_clique[d.mol_index.item()][clique])])
+                        clique_idx.extend([clique_list.index(clique) for i in range(mol_to_clique[d.mol_index.item()][clique])])
+                    ct += 1
+                mol_idx = torch.tensor(mol_idx).to(self.device)
+                clique_idx = torch.tensor(clique_idx).to(self.device)
+
+                __, pred = model(data, mol_idx, clique_idx)
+                loss = self._step(model, data, bn, mol_idx, clique_idx)
 
                 valid_loss += loss.item() * data.y.size(0)
                 num_data += data.y.size(0)
@@ -291,7 +318,7 @@ class FineTune(object):
             print('Validation loss:', valid_loss, 'ROC AUC:', roc_auc)
             return valid_loss, roc_auc
 
-    def _test(self, model, test_loader):
+    def _test(self, model, test_loader, clique_list, mol_to_clique):
         model_path = os.path.join(self.writer.log_dir, 'checkpoints', 'model.pth')
         state_dict = torch.load(model_path, map_location=self.device)
         model.load_state_dict(state_dict)
@@ -308,8 +335,19 @@ class FineTune(object):
             for bn, data in enumerate(test_loader):
                 data = data.to(self.device)
 
-                __, pred = model(data, self.device)
-                loss = self._step(model, data, bn)
+                mol_idx = []
+                clique_idx = []
+                ct = 0
+                for d in data.to_data_list():
+                    for clique in mol_to_clique[d.mol_index.item()].keys():
+                        mol_idx.extend([ct for i in range(mol_to_clique[d.mol_index.item()][clique])])
+                        clique_idx.extend([clique_list.index(clique) for i in range(mol_to_clique[d.mol_index.item()][clique])])
+                    ct += 1
+                mol_idx = torch.tensor(mol_idx).to(self.device)
+                clique_idx = torch.tensor(clique_idx).to(self.device)
+
+                __, pred = model(data, mol_idx, clique_idx)
+                loss = self._step(model, data, bn, mol_idx, clique_idx)
 
                 test_loss += loss.item() * data.y.size(0)
                 num_data += data.y.size(0)

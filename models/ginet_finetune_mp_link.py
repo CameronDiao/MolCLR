@@ -60,10 +60,11 @@ class GINet(nn.Module):
         node representations
     """
     def __init__(self, 
-        task='classification', num_layer=5, emb_dim=300, feat_dim=512, 
+        num_motifs, task='classification', num_layer=5, emb_dim=300, feat_dim=512, 
         drop_ratio=0, pool='mean', pred_n_layer=2, pred_act='softplus'
     ):
         super(GINet, self).__init__()
+        self.num_motifs = num_motifs
         self.num_layer = num_layer
         self.emb_dim = emb_dim
         self.feat_dim = feat_dim
@@ -74,8 +75,9 @@ class GINet(nn.Module):
         self.x_embedding2 = nn.Embedding(num_chirality_tag, emb_dim)
         nn.init.xavier_uniform_(self.x_embedding1.weight.data)
         nn.init.xavier_uniform_(self.x_embedding2.weight.data)
-       
+        
         self.label_embedding = nn.Embedding(2, feat_dim)
+        self.motif_embedding = nn.Embedding(num_motifs, feat_dim)
 
         # List of MLPs
         self.gnns = nn.ModuleList()
@@ -98,13 +100,16 @@ class GINet(nn.Module):
         out_dim = 1
       
         self.label_lin = nn.Linear(self.feat_dim, self.feat_dim)
-        nn.init.xavier_uniform_(self.label_lin.weight)
+        nn.init.xavier_uniform_(self.label_lin.weight.data)
+
+        self.motif_lin = nn.Linear(self.feat_dim, self.feat_dim)
+        nn.init.xavier_uniform_(self.motif_lin.weight.data)
 
         self.pred_n_layer = max(1, pred_n_layer)
 
         if pred_act == 'relu':
             pred_head = [
-                nn.Linear(2 * self.feat_dim, self.feat_dim//2), 
+                nn.Linear(3 * self.feat_dim, self.feat_dim//2), 
                 nn.ReLU(inplace=True)
             ]
             for _ in range(self.pred_n_layer - 1):
@@ -114,7 +119,7 @@ class GINet(nn.Module):
                 ])
         elif pred_act == 'softplus':
             pred_head = [
-                nn.Linear(2 * self.feat_dim, self.feat_dim//2), 
+                nn.Linear(3 * self.feat_dim, self.feat_dim//2), 
                 nn.Softplus()
             ]
             for _ in range(self.pred_n_layer - 1):
@@ -130,9 +135,13 @@ class GINet(nn.Module):
 
     def init_label_emb(self, init):
         with torch.no_grad():
-            self.label_embedding.weight = nn.Parameter(init)
+            self.label_embedding.weight.data = nn.Parameter(init)
 
-    def forward(self, data, device):
+    def init_motif_emb(self, init):
+        with torch.no_grad():
+            self.motif_embedding.weight.data = nn.Parameter(init)
+
+    def forward(self, data, mol_idx, clique_idx, device):
         x = data.x
         edge_index = data.edge_index
         edge_attr = data.edge_attr
@@ -156,6 +165,13 @@ class GINet(nn.Module):
 
         h1 = torch.cat((h, h1), dim=1)
         h2 = torch.cat((h, h2), dim=1)
+
+        hp = self.motif_embedding(clique_idx)
+        hp = self.pool(hp, mol_idx)
+        hp = self.motif_lin(hp)
+
+        h1 = torch.cat((h1, hp), dim=1)
+        h2 = torch.cat((h2, hp), dim=1)
 
         p = torch.cat((self.pred_head(h1), self.pred_head(h2)), dim=1)
 
