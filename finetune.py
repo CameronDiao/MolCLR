@@ -89,7 +89,7 @@ class FineTune(object):
     def _step(self, model, data, n_iter, mol_idx, clique_idx):
         
         # get the prediction
-        __, pred = model(data, mol_idx, clique_idx, self.device)
+        __, pred = model(data, mol_idx, clique_idx)
         if self.config['dataset']['task'] == 'classification':
             loss = self.criterion(pred, data.y.flatten())
         elif self.config['dataset']['task'] == 'regression':
@@ -146,35 +146,19 @@ class FineTune(object):
             model = GINet(self.config['dataset']['task'], **self.config["model"]).to(self.device)
             model = self._load_pre_trained_weights(model)
             
-            motif_feats = []
+            feats = []
             for c in clique_loader:
                 c = c.to(self.device)
                 emb, __ = model(c)
-                motif_feats.append(emb)
+                feats.append(emb)
             
             with torch.no_grad():               
-                motif_feats = torch.cat(motif_feats)
+                feats = torch.cat(feats)
 
-            label_feats = []
-            labels = []
-            for d in train_loader:
-                d = d.to(self.device)
-                emb, __ = model(d)
-                label_feats.append(emb)
-                labels.append(d.y)
-            label_feats = torch.cat(label_feats)
-            labels = torch.cat(labels)
-
-            label_init1 = torch.mean(label_feats[torch.nonzero(labels == 0)[:, 0]], dim=0)
-            label_init2 = torch.mean(label_feats[torch.nonzero(labels == 1)[:, 0]], dim=0)
-
-            label_init = torch.vstack((label_init1, label_init2)).to(self.device)
-
-            from models.ginet_finetune_mp_link import GINet
+            from models.ginet_finetune_mp import GINet
             model = GINet(num_motifs, self.config['dataset']['task'], **self.config["model"]).to(self.device)
             model = self._load_pre_trained_weights(model)
-            model.init_label_emb(label_init)
-            model.init_motif_emb(motif_feats)
+            model.init_motif_emb(feats)
         elif self.config['model_type'] == 'gcn':
             from models.gcn_finetune import GCN
             model = GCN(self.config['dataset']['task'], **self.config["model"]).to(self.device)
@@ -295,7 +279,7 @@ class FineTune(object):
                 mol_idx = torch.tensor(mol_idx).to(self.device)
                 clique_idx = torch.tensor(clique_idx).to(self.device)
 
-                __, pred = model(data, mol_idx, clique_idx, self.device)
+                __, pred = model(data, mol_idx, clique_idx)
                 loss = self._step(model, data, bn, mol_idx, clique_idx)
 
                 valid_loss += loss.item() * data.y.size(0)
@@ -362,7 +346,7 @@ class FineTune(object):
                 mol_idx = torch.tensor(mol_idx).to(self.device)
                 clique_idx = torch.tensor(clique_idx).to(self.device)
 
-                __, pred = model(data, mol_idx, clique_idx, self.device)
+                __, pred = model(data, mol_idx, clique_idx)
                 loss = self._step(model, data, bn, mol_idx, clique_idx)
 
                 test_loss += loss.item() * data.y.size(0)
