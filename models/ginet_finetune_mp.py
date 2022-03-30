@@ -102,7 +102,7 @@ class GINet(nn.Module):
             out_dim = 1
         
         self.motif_lin = nn.Linear(self.feat_dim, self.feat_dim)
-        nn.init.xavier_uniform_(self.motif_lin.weight.data)
+        nn.init.xavier_uniform_(self.motif_lin.weight)
 
         self.pred_n_layer = max(1, pred_n_layer)
 
@@ -134,7 +134,7 @@ class GINet(nn.Module):
 
     def init_motif_emb(self, init):
         with torch.no_grad():
-            self.motif_embedding.weight.data = nn.Parameter(init)
+            self.motif_embedding.weight = nn.Parameter(init)
     
     def forward(self, data, mol_idx, clique_idx):
         x = data.x
