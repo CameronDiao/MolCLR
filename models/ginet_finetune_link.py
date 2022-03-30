@@ -98,7 +98,7 @@ class GINet(nn.Module):
         out_dim = 1
       
         self.label_lin = nn.Linear(self.feat_dim, self.feat_dim)
-        nn.init.xavier_uniform_(self.label_lin.weight)
+        nn.init.xavier_uniform_(self.label_lin.weight.data)
 
         self.pred_n_layer = max(1, pred_n_layer)
 
@@ -149,9 +149,9 @@ class GINet(nn.Module):
 
         h = self.pool(h, data.batch)
         h = self.feat_lin(h)
-        h1 = torch.squeeze(self.label_embedding(torch.zeros(h.shape[0]).type(torch.LongTensor).to(device)))
+        h1 = torch.squeeze(self.label_embedding(torch.zeros(h.shape[0], dtype=torch.long).to(device)))
         h1 = self.label_lin(h1)
-        h2 = torch.squeeze(self.label_embedding(torch.ones(h.shape[0]).type(torch.LongTensor).to(device)))
+        h2 = torch.squeeze(self.label_embedding(torch.ones(h.shape[0], dtype=torch.long).to(device)))
         h2 = self.label_lin(h2)
 
         h1 = torch.cat((h, h1), dim=1)

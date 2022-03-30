@@ -101,16 +101,6 @@ class FineTune(object):
     def train(self):
         train_loader, valid_loader, test_loader = self.dataset.get_data_loaders()
 
-        #clique_path = "./" + self.config["task_name"] + "/clique.txt"
-        #clique_list = []
-        #if os.path.exists(clique_path):
-        #    with open(clique_path, "r") as f:
-        #        for line in f.readlines():
-        #            line = line.strip('\n')
-        #            clique_list.append(line)
-        #else:
-        #    
-
         self.normalizer = None
         
         if self.config["task_name"] in ['qm7', 'qm9']:
@@ -125,7 +115,6 @@ class FineTune(object):
             from models.ginet_finetune import GINet
             model = GINet(self.config['dataset']['task'], **self.config["model"]).to(self.device)
             model = self._load_pre_trained_weights(model)
-            
 
             feats = []
             labels = []
@@ -134,13 +123,14 @@ class FineTune(object):
                 emb, __ = model(d)
                 feats.append(emb)
                 labels.append(d.y)
-            feats = torch.cat(feats)
-            labels = torch.cat(labels)
+            with torch.no_grad():
+                feats = torch.cat(feats)
+                labels = torch.cat(labels)
             
-            init1 = torch.mean(feats[torch.nonzero(labels == 0)[:, 0]], dim=0)
-            init2 = torch.mean(feats[torch.nonzero(labels == 1)[:, 0]], dim=0)
+                init1 = torch.mean(feats[torch.nonzero(labels == 0)[:, 0]], dim=0)
+                init2 = torch.mean(feats[torch.nonzero(labels == 1)[:, 0]], dim=0)
 
-            init = torch.vstack((init1, init2)).to(self.device)
+                init = torch.vstack((init1, init2)).to(self.device)
 
             from models.ginet_finetune_link import GINet
             model = GINet(self.config['dataset']['task'], **self.config["model"]).to(self.device)
