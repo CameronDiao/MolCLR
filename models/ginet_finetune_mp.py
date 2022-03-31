@@ -156,25 +156,10 @@ class GINet(nn.Module):
         h = self.feat_lin(h)
 
         hp = self.motif_embedding(clique_idx)
+        hp = torch.cat((hp, h), dim=0)
         hp = self.motif_pool(hp, mol_idx)
         hp = self.motif_lin(hp)
 
-        #hp = []
-        #for d in data.to_data_list():
-        #    t = []
-        #    coef = []
-        #    for clique in self.mol_to_clique[d.mol_index.item()].keys():
-        #        idx = torch.tensor(self.clique_list.index(clique)).to(device)
-        #        t.append(self.motif_embedding(idx))
-        #        coef.append(self.mol_to_clique[d.mol_index.item()][clique])
-        #        #t.extend([self.motif_embedding(idx) for i in range(self.mol_to_clique[d.mol_index.item()][clique])])
-        #    t = torch.stack(t).to(device)
-        #    coef = torch.tensor(coef).to(device)
-        #    t = self.motif_lin(t)
-        #    t = t * coef[:, None]
-        #    t = torch.mean(t, 0)
-        #    hp.append(t)
-        #hp = torch.stack(hp)
         h = torch.cat((h, hp), dim=1)
 
         return h, self.pred_head(h)

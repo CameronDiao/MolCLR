@@ -198,17 +198,18 @@ class FineTune(object):
                 optimizer.zero_grad()
 
                 data = data.to(self.device)
-               
+             
                 mol_idx = []
                 clique_idx = []
                 for i, d in enumerate(data.to_data_list()):
                     for clique in mol_to_clique[d.mol_index.item()].keys():
                         mol_idx.append(i)
                         clique_idx.append(clique_list.index(clique))
+                mol_idx.extend([i for i in range(max(mol_idx) + 1)])
                 mol_idx = torch.tensor(mol_idx).to(self.device)
                 clique_idx = torch.tensor(clique_idx).to(self.device)
                 
-                loss = self._step(model, data, n_iter, mol_idx, clique_idx)
+                loss = self._step(model, data, n_iter,  mol_idx, clique_idx)
 
                 if n_iter % self.config['log_every_n_steps'] == 0:
                     self.writer.add_scalar('train_loss', loss, global_step=n_iter)
@@ -272,6 +273,7 @@ class FineTune(object):
                     for clique in mol_to_clique[d.mol_index.item()].keys():
                         mol_idx.append(i)
                         clique_idx.append(clique_list.index(clique))
+                mol_idx.extend([i for i in range(max(mol_idx) + 1)])
                 mol_idx = torch.tensor(mol_idx).to(self.device)
                 clique_idx = torch.tensor(clique_idx).to(self.device)
 
@@ -337,6 +339,7 @@ class FineTune(object):
                     for clique in mol_to_clique[d.mol_index.item()].keys():
                         mol_idx.append(i)
                         clique_idx.append(clique_list.index(clique))
+                mol_idx.extend([i for i in range(max(mol_idx) + 1)])
                 mol_idx = torch.tensor(mol_idx).to(self.device)
                 clique_idx = torch.tensor(clique_idx).to(self.device)
 
