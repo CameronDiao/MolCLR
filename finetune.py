@@ -201,12 +201,10 @@ class FineTune(object):
                
                 mol_idx = []
                 clique_idx = []
-                ct = 0
-                for d in data.to_data_list():
+                for i, d in enumerate(data.to_data_list()):
                     for clique in mol_to_clique[d.mol_index.item()].keys():
-                        mol_idx.extend([ct for i in range(mol_to_clique[d.mol_index.item()][clique])])
-                        clique_idx.extend([clique_list.index(clique) for i in range(mol_to_clique[d.mol_index.item()][clique])])
-                    ct += 1
+                        mol_idx.append(i)
+                        clique_idx.append(clique_list.index(clique))
                 mol_idx = torch.tensor(mol_idx).to(self.device)
                 clique_idx = torch.tensor(clique_idx).to(self.device)
                 
@@ -270,12 +268,10 @@ class FineTune(object):
 
                 mol_idx = []
                 clique_idx = []
-                ct = 0
-                for d in data.to_data_list():
+                for i, d in enumerate(data.to_data_list()):
                     for clique in mol_to_clique[d.mol_index.item()].keys():
-                        mol_idx.extend([ct for i in range(mol_to_clique[d.mol_index.item()][clique])])
-                        clique_idx.extend([clique_list.index(clique) for i in range(mol_to_clique[d.mol_index.item()][clique])])
-                    ct += 1
+                        mol_idx.append(i)
+                        clique_idx.append(clique_list.index(clique))
                 mol_idx = torch.tensor(mol_idx).to(self.device)
                 clique_idx = torch.tensor(clique_idx).to(self.device)
 
@@ -337,12 +333,10 @@ class FineTune(object):
 
                 mol_idx = []
                 clique_idx = []
-                ct = 0
-                for d in data.to_data_list():
+                for i, d in enumerate(data.to_data_list()):
                     for clique in mol_to_clique[d.mol_index.item()].keys():
-                        mol_idx.extend([ct for i in range(mol_to_clique[d.mol_index.item()][clique])])
-                        clique_idx.extend([clique_list.index(clique) for i in range(mol_to_clique[d.mol_index.item()][clique])])
-                    ct += 1
+                        mol_idx.append(i)
+                        clique_idx.append(clique_list.index(clique))
                 mol_idx = torch.tensor(mol_idx).to(self.device)
                 clique_idx = torch.tensor(clique_idx).to(self.device)
 

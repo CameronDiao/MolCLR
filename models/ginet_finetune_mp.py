@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import add_self_loops
-from torch_geometric.nn import global_add_pool, global_mean_pool, global_max_pool
+from torch_geometric.nn import global_add_pool, global_mean_pool, global_max_pool, GlobalAttention, Set2Set
 
 num_atom_type = 119 # including the extra mask tokens
 num_chirality_tag = 3
@@ -104,6 +104,8 @@ class GINet(nn.Module):
         self.motif_lin = nn.Linear(self.feat_dim, self.feat_dim)
         nn.init.xavier_uniform_(self.motif_lin.weight.data)
 
+        self.motif_pool = GlobalAttention(gate_nn=nn.Sequential(nn.Linear(feat_dim, 1)))
+
         self.pred_n_layer = max(1, pred_n_layer)
 
         if pred_act == 'relu':
@@ -154,7 +156,7 @@ class GINet(nn.Module):
         h = self.feat_lin(h)
 
         hp = self.motif_embedding(clique_idx)
-        hp = self.pool(hp, mol_idx)
+        hp = self.motif_pool(hp, mol_idx)
         hp = self.motif_lin(hp)
 
         #hp = []
