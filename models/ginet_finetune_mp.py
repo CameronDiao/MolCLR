@@ -101,10 +101,13 @@ class GINet(nn.Module):
         elif self.task == 'regression':
             out_dim = 1
         
-        self.motif_lin = nn.Linear(self.feat_dim, self.feat_dim)
-        nn.init.xavier_uniform_(self.motif_lin.weight.data)
+        #self.motif_lin = nn.Linear(self.feat_dim, self.feat_dim//2)
+        #nn.init.xavier_uniform_(self.motif_lin.weight.data)
 
-        self.motif_pool = GlobalAttention(gate_nn=nn.Sequential(nn.Linear(feat_dim, 1)))
+        self.motif_pool = GlobalAttention(gate_nn=nn.Sequential(nn.Linear(feat_dim, 1)),
+                                          nn=nn.Sequential(nn.Linear(feat_dim, feat_dim//2)))
+
+        #self.motif_pool = GlobalAttention(gate_nn=nn.Sequential(nn.Linear(feat_dim, 1)))
 
         self.pred_n_layer = max(1, pred_n_layer)
 
@@ -120,7 +123,7 @@ class GINet(nn.Module):
                 ])
         elif pred_act == 'softplus':
             pred_head = [
-                nn.Linear(2 * self.feat_dim, self.feat_dim//2), 
+                nn.Linear(int(1.5 * self.feat_dim), self.feat_dim//2), 
                 nn.Softplus()
             ]
             for _ in range(self.pred_n_layer - 1):
@@ -158,7 +161,7 @@ class GINet(nn.Module):
         hp = self.motif_embedding(clique_idx)
         hp = torch.cat((hp, h), dim=0)
         hp = self.motif_pool(hp, mol_idx)
-        hp = self.motif_lin(hp)
+        #hp = self.motif_lin(hp)
 
         h = torch.cat((h, hp), dim=1)
 
