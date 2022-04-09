@@ -86,10 +86,9 @@ class FineTune(object):
 
         return device
 
-    def _step(self, model, data, n_iter, mol_idx, clique_idx):
-        
+    def _step(self, model, data, n_iter, mol_idx, shuffle_idx, clique_idx):
         # get the prediction
-        __, pred = model(data, mol_idx, clique_idx)
+        __, pred = model(data, mol_idx, shuffle_idx, clique_idx)
         if self.config['dataset']['task'] == 'classification':
             loss = self.criterion(pred, data.y.flatten())
         elif self.config['dataset']['task'] == 'regression':
@@ -198,18 +197,33 @@ class FineTune(object):
                 optimizer.zero_grad()
 
                 data = data.to(self.device)
-             
+            
+                count = 1
                 mol_idx = []
                 clique_idx = []
                 for i, d in enumerate(data.to_data_list()):
                     for clique in mol_to_clique[d.mol_index.item()].keys():
-                        mol_idx.append(i)
+                        count += 1
                         clique_idx.append(clique_list.index(clique))
-                mol_idx.extend([i for i in range(max(mol_idx) + 1)])
+                    mol_idx.append(count)
+                    count = 1
+
+                count = 0
+                l = len(clique_idx)
+                shuffle_idx = []
+                for i, d in enumerate(data.to_data_list()):
+                    shuffle_idx.append(l)
+                    for clique in mol_to_clique[d.mol_index.item()].keys():
+                        shuffle_idx.append(count)
+                        count += 1
+                    l += 1
+
+                #mol_idx.extend([i for i in range(max(mol_idx) + 1)])
                 mol_idx = torch.tensor(mol_idx).to(self.device)
+                shuffle_idx = torch.tensor(shuffle_idx).to(self.device)
                 clique_idx = torch.tensor(clique_idx).to(self.device)
-                
-                loss = self._step(model, data, n_iter,  mol_idx, clique_idx)
+
+                loss = self._step(model, data, n_iter,  mol_idx, shuffle_idx, clique_idx)
 
                 if n_iter % self.config['log_every_n_steps'] == 0:
                     self.writer.add_scalar('train_loss', loss, global_step=n_iter)
@@ -267,18 +281,32 @@ class FineTune(object):
             for bn, data in enumerate(valid_loader):
                 data = data.to(self.device)
 
+                count = 1
                 mol_idx = []
                 clique_idx = []
                 for i, d in enumerate(data.to_data_list()):
                     for clique in mol_to_clique[d.mol_index.item()].keys():
-                        mol_idx.append(i)
+                        #mol_idx.append(i)
+                        count += 1
                         clique_idx.append(clique_list.index(clique))
-                mol_idx.extend([i for i in range(max(mol_idx) + 1)])
+                    mol_idx.append(count)
+                    count = 1
+
+                l = len(clique_idx)
+                shuffle_idx = []
+                for i, d in enumerate(data.to_data_list()):
+                    shuffle_idx.append(l)
+                    for clique in mol_to_clique[d.mol_index.item()].keys():
+                        shuffle_idx.append(i)
+                    l += 1
+
+                #mol_idx.extend([i for i in range(max(mol_idx) + 1)])
                 mol_idx = torch.tensor(mol_idx).to(self.device)
+                shuffle_idx = torch.tensor(shuffle_idx).to(self.device)
                 clique_idx = torch.tensor(clique_idx).to(self.device)
 
-                __, pred = model(data, mol_idx, clique_idx)
-                loss = self._step(model, data, bn, mol_idx, clique_idx)
+                __, pred = model(data, mol_idx, shuffle_idx, clique_idx)
+                loss = self._step(model, data, bn, mol_idx, shuffle_idx, clique_idx)
 
                 valid_loss += loss.item() * data.y.size(0)
                 num_data += data.y.size(0)
@@ -333,18 +361,32 @@ class FineTune(object):
             for bn, data in enumerate(test_loader):
                 data = data.to(self.device)
 
+                count = 1
                 mol_idx = []
                 clique_idx = []
                 for i, d in enumerate(data.to_data_list()):
                     for clique in mol_to_clique[d.mol_index.item()].keys():
-                        mol_idx.append(i)
+                        #mol_idx.append(i)
+                        count += 1
                         clique_idx.append(clique_list.index(clique))
-                mol_idx.extend([i for i in range(max(mol_idx) + 1)])
+                    mol_idx.append(count)
+                    count = 1
+
+                l = len(clique_idx)
+                shuffle_idx = []
+                for i, d in enumerate(data.to_data_list()):
+                    shuffle_idx.append(l)
+                    for clique in mol_to_clique[d.mol_index.item()].keys():
+                        shuffle_idx.append(i)
+                    l += 1
+
+                #mol_idx.extend([i for i in range(max(mol_idx) + 1)])
                 mol_idx = torch.tensor(mol_idx).to(self.device)
+                shuffle_idx = torch.tensor(shuffle_idx).to(self.device)
                 clique_idx = torch.tensor(clique_idx).to(self.device)
 
-                __, pred = model(data, mol_idx, clique_idx)
-                loss = self._step(model, data, bn, mol_idx, clique_idx)
+                __, pred = model(data, mol_idx, shuffle_idx, clique_idx)
+                loss = self._step(model, data, bn, mol_idx, shuffle_idx, clique_idx)
 
                 test_loss += loss.item() * data.y.size(0)
                 num_data += data.y.size(0)

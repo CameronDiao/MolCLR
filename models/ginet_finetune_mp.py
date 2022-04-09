@@ -6,6 +6,8 @@ from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import add_self_loops
 from torch_geometric.nn import global_add_pool, global_mean_pool, global_max_pool, GlobalAttention, Set2Set
 
+from dgl.nn.pytorch.glob import PMALayer
+
 num_atom_type = 119 # including the extra mask tokens
 num_chirality_tag = 3
 
@@ -104,10 +106,13 @@ class GINet(nn.Module):
         #self.motif_lin = nn.Linear(self.feat_dim, self.feat_dim//2)
         #nn.init.xavier_uniform_(self.motif_lin.weight.data)
 
-        self.motif_pool = GlobalAttention(gate_nn=nn.Sequential(nn.Linear(feat_dim, 1)),
-                                          nn=nn.Sequential(nn.Linear(feat_dim, feat_dim//2)))
+        #self.motif_pool = GlobalAttention(gate_nn=nn.Sequential(nn.Linear(feat_dim, 1)),
+        #                                  nn=nn.Sequential(nn.Linear(feat_dim, feat_dim//2)))
 
         #self.motif_pool = GlobalAttention(gate_nn=nn.Sequential(nn.Linear(feat_dim, 1)))
+
+        self.motif_pool = PMALayer(k=1, d_model=self.feat_dim, num_heads=2, d_head=self.feat_dim//2,
+                                   d_ff=self.feat_dim//2)
 
         self.pred_n_layer = max(1, pred_n_layer)
 
@@ -123,7 +128,7 @@ class GINet(nn.Module):
                 ])
         elif pred_act == 'softplus':
             pred_head = [
-                nn.Linear(int(1.5 * self.feat_dim), self.feat_dim//2), 
+                nn.Linear(2 * self.feat_dim, self.feat_dim//2), 
                 nn.Softplus()
             ]
             for _ in range(self.pred_n_layer - 1):
@@ -141,7 +146,7 @@ class GINet(nn.Module):
         with torch.no_grad():
             self.motif_embedding.weight.data = nn.Parameter(init)
     
-    def forward(self, data, mol_idx, clique_idx):
+    def forward(self, data, mol_idx, shuffle_idx, clique_idx):
         x = data.x
         edge_index = data.edge_index
         edge_attr = data.edge_attr
@@ -159,8 +164,8 @@ class GINet(nn.Module):
         h = self.feat_lin(h)
 
         hp = self.motif_embedding(clique_idx)
-        hp = torch.cat((hp, h), dim=0)
-        hp = self.motif_pool(hp, mol_idx)
+        hp = torch.cat((hp, h), dim=0).index_select(0, shuffle_idx)
+        hp = self.motif_pool(hp, list(mol_idx))
         #hp = self.motif_lin(hp)
 
         h = torch.cat((h, hp), dim=1)
