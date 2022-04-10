@@ -6,7 +6,7 @@ from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import add_self_loops
 from torch_geometric.nn import global_add_pool, global_mean_pool, global_max_pool, GlobalAttention, Set2Set
 
-from dgl.nn.pytorch.glob import PMALayer
+from dgl.nn.pytorch.glob import SetAttentionBlock, PMALayer
 
 num_atom_type = 119 # including the extra mask tokens
 num_chirality_tag = 3
@@ -14,6 +14,28 @@ num_chirality_tag = 3
 num_bond_type = 5 # including aromatic and self-loop edge
 num_bond_direction = 3 
 
+class SetTransformerDecoder(nn.Module):
+    def __init__(self, d_model, num_heads, d_head, d_ff, n_layers, k, dropouth=0., dropouta=0.):
+        super(SetTransformerDecoder, self).__init__()
+        self.n_layers=n_layers
+        self.k = k
+        self.d_model = d_model
+        self.pma = PMALayer(k, d_model, num_heads, d_head, d_ff,
+                                dropouth=dropouth, dropouta=dropouta)
+        layers = []
+        for _ in range(n_layers):
+            layers.append(
+                SetAttentionBlock(d_model, num_heads, d_head, d_ff,
+                                  dropouth=dropouth, dropouta=dropouta))
+        self.layers = nn.ModuleList(layers)
+
+    def forward(self, data, feat, mol_idx):
+        len_pma = list(mol_idx)
+        len_sab = [self.k] * data.num_graphs
+        feat = self.pma(feat, len_pma)
+        for layer in self.layers:
+            feat = layer(feat, len_sab)
+        return feat[::2, :], feat[1::2, :] 
 
 class GINEConv(MessagePassing):
     def __init__(self, emb_dim):
@@ -106,13 +128,14 @@ class GINet(nn.Module):
         #self.motif_lin = nn.Linear(self.feat_dim, self.feat_dim//2)
         #nn.init.xavier_uniform_(self.motif_lin.weight.data)
 
-        #self.motif_pool = GlobalAttention(gate_nn=nn.Sequential(nn.Linear(feat_dim, 1)),
-        #                                  nn=nn.Sequential(nn.Linear(feat_dim, feat_dim//2)))
+        #self.motif_pool = GlobalAttention(gate_nn=nn.Sequential(nn.Linear(self.feat_dim, 1)),
+        #                                  nn=nn.Sequential(nn.Linear(self.feat_dim, self.feat_dim//2)))
 
-        #self.motif_pool = GlobalAttention(gate_nn=nn.Sequential(nn.Linear(feat_dim, 1)))
+        #self.motif_pool = PMALayer(k=2, d_model=self.feat_dim, num_heads=2, d_head=self.feat_dim,
+        #                           d_ff=self.feat_dim)
 
-        self.motif_pool = PMALayer(k=1, d_model=self.feat_dim, num_heads=2, d_head=self.feat_dim//2,
-                                   d_ff=self.feat_dim//2)
+        self.motif_trans = SetTransformerDecoder(d_model=self.feat_dim, num_heads=2, d_head=self.feat_dim,
+                                                 d_ff=self.feat_dim, n_layers=1, k=2)
 
         self.pred_n_layer = max(1, pred_n_layer)
 
@@ -165,12 +188,19 @@ class GINet(nn.Module):
 
         hp = self.motif_embedding(clique_idx)
         hp = torch.cat((hp, h), dim=0).index_select(0, shuffle_idx)
-        hp = self.motif_pool(hp, list(mol_idx))
+        h1, h2 = self.motif_trans(data, hp, mol_idx)
+        h1 = torch.cat((h, h1), dim=1)
+        h2 = torch.cat((h, h2), dim=1)
+        
+        p = torch.cat((self.pred_head(h1), self.pred_head(h2)), dim=1)
+
+        return h, p
+        #hp = self.motif_pool(hp, list(mol_idx))
         #hp = self.motif_lin(hp)
 
-        h = torch.cat((h, hp), dim=1)
+        #h = torch.cat((h, hp), dim=1)
 
-        return h, self.pred_head(h)
+        #return h, self.pred_head(h)
 
     def load_my_state_dict(self, state_dict):
         own_state = self.state_dict()
