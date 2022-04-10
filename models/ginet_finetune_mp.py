@@ -100,7 +100,7 @@ class GINet(nn.Module):
         nn.init.xavier_uniform_(self.x_embedding1.weight.data)
         nn.init.xavier_uniform_(self.x_embedding2.weight.data)
 
-        self.motif_embedding = nn.Embedding(num_motifs, feat_dim)
+        #self.motif_embedding = nn.Embedding(num_motifs, feat_dim)
 
         # List of MLPs
         self.gnns = nn.ModuleList()
@@ -165,11 +165,11 @@ class GINet(nn.Module):
         pred_head.append(nn.Linear(self.feat_dim//2, out_dim))
         self.pred_head = nn.Sequential(*pred_head)
 
-    def init_motif_emb(self, init):
-        with torch.no_grad():
-            self.motif_embedding.weight.data = nn.Parameter(init)
+    #def init_motif_emb(self, init):
+    #    with torch.no_grad():
+    #        self.motif_embedding.weight.data = nn.Parameter(init)
     
-    def forward(self, data, mol_idx, shuffle_idx, clique_idx):
+    def forward(self, data, mol_idx, shuffle_idx, motif_samples):
         x = data.x
         edge_index = data.edge_index
         edge_attr = data.edge_attr
@@ -186,8 +186,7 @@ class GINet(nn.Module):
         h = self.pool(h, data.batch)
         h = self.feat_lin(h)
 
-        hp = self.motif_embedding(clique_idx)
-        hp = torch.cat((hp, h), dim=0).index_select(0, shuffle_idx)
+        hp = torch.cat((motif_samples, h), dim=0).index_select(0, shuffle_idx)
         h1, h2 = self.motif_trans(data, hp, mol_idx)
         h1 = torch.cat((h, h1), dim=1)
         h2 = torch.cat((h, h2), dim=1)
