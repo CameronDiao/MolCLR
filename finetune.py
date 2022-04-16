@@ -5,6 +5,7 @@ import yaml
 import numpy as np
 import pandas as pd
 from datetime import datetime
+from collections import defaultdict
 
 import torch
 from torch import nn
@@ -36,6 +37,13 @@ def _save_config_file(model_checkpoints_folder):
     if not os.path.exists(model_checkpoints_folder):
         os.makedirs(model_checkpoints_folder)
         shutil.copy('./config_finetune.yaml', os.path.join(model_checkpoints_folder, 'config_finetune.yaml'))
+
+def _gen_clique_to_mol(clique_list, mol_to_clique):
+    clique_to_mol = defaultdict(list)
+    for mol in mol_to_clique:
+        for clique in mol_to_clique[mol]:
+            clique_to_mol[clique_list.index(clique)].append(mol)
+    return clique_to_mol
 
 class Normalizer(object):
     """Normalize a Tensor and restore it later. """
@@ -120,15 +128,14 @@ class FineTune(object):
                     mol_to_clique[i][cs] += 1
         return list(clique_set), mol_to_clique
 
-
     def train(self):
         smiles_data, train_loader, valid_loader, test_loader = self.dataset.get_data_loaders()
+        #full_data_loader = self.dataset.get_full_data_loader()
 
         clique_list, mol_to_clique = self._gen_cliques(smiles_data)
+        print("Finished generating motif vocabulary")
+        #clique_to_mol = _gen_clique_to_mol(clique_list, mol_to_clique)
         num_motifs = len(clique_list)
-
-        #clique_dataset = MolCliqueDataset(clique_list)
-        #clique_loader = DataLoader(clique_dataset, batch_size=self.config['batch_size'], num_workers=self.config['dataset']['num_workers'])
 
         clique_dataset = MolCliqueDatasetWrapper(clique_list, self.config['batch_size'], self.config['dataset']['num_workers'])
         clique_loader = clique_dataset.get_data_loaders()
