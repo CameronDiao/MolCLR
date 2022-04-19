@@ -130,15 +130,15 @@ class FineTune(object):
 
     def train(self):
         smiles_data, train_loader, valid_loader, test_loader = self.dataset.get_data_loaders()
-        #full_data_loader = self.dataset.get_full_data_loader()
+        full_data_loader = self.dataset.get_full_data_loader()
 
         clique_list, mol_to_clique = self._gen_cliques(smiles_data)
         print("Finished generating motif vocabulary")
-        #clique_to_mol = _gen_clique_to_mol(clique_list, mol_to_clique)
+        clique_to_mol = _gen_clique_to_mol(clique_list, mol_to_clique)
         num_motifs = len(clique_list)
 
-        clique_dataset = MolCliqueDatasetWrapper(clique_list, self.config['batch_size'], self.config['dataset']['num_workers'])
-        clique_loader = clique_dataset.get_data_loaders()
+        #clique_dataset = MolCliqueDatasetWrapper(clique_list, self.config['batch_size'], self.config['dataset']['num_workers'])
+        #clique_loader = clique_dataset.get_data_loaders()
 
         self.normalizer = None
       
@@ -155,14 +155,26 @@ class FineTune(object):
             model = GINet(self.config['dataset']['task'], **self.config["model"]).to(self.device)
             model = self._load_pre_trained_weights(model)
             
+            mol_to_feats = {}
+            for data in full_data_loader:
+                data = data.to(self.device)
+                emb, __ = model(data)
+                for i, d in enumerate(data.to_data_list()):
+                    mol_to_feats[d.mol_index.item()] = emb[i, :]
+
             feats = []
-            for c in clique_loader:
-                c = c.to(self.device)
-                emb, __ = model(c)
-                feats.append(emb)
-            
+            with torch.no_grad():
+                for i in range(len(clique_list)):
+                    mfeats = [mol_to_feats[mol] for mol in clique_to_mol[i]]
+                    feats.append(torch.mean(torch.stack(mfeats), dim=0))
+
+            #for c in clique_loader:
+            #    c = c.to(self.device)
+            #    emb, __ = model(c)
+            #    feats.append(emb)
+           
             with torch.no_grad():               
-                feats = torch.cat(feats)
+                feats = torch.stack(feats)
 
             from models.ginet_finetune_mp import GINet
             model = GINet(num_motifs, self.config['dataset']['task'], **self.config["model"]).to(self.device)

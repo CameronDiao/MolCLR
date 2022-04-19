@@ -108,7 +108,6 @@ def read_smiles(data_path, target, task):
                         labels.append(float(label))
                     else:
                         ValueError('task must be either regression or classification')
-    print(len(smiles_data))
     return smiles_data, labels
 
 class MolTestDataset(Dataset):
@@ -185,6 +184,11 @@ class MolTestDatasetWrapper(object):
         self.task = task
         self.splitting = splitting
         assert splitting in ['random', 'scaffold']
+
+    def get_full_data_loader(self):
+        train_dataset = MolTestDataset(data_path=self.data_path, target=self.target, task=self.task)
+        train_loader = DataLoader(train_dataset, batch_size=self.batch_size, num_workers=self.num_workers)
+        return train_loader
 
     def get_data_loaders(self):
         train_dataset = MolTestDataset(data_path=self.data_path, target=self.target, task=self.task)

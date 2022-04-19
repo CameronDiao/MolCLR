@@ -367,7 +367,7 @@ class GINet(nn.Module):
         #                                           out_channels=self.feat_dim, pool_sequences=["GMPool_I"])
         
         #self.motif_trans = SAB(in_channels=self.feat_dim, out_channels=self.feat_dim, num_heads=4)
-        self.motif_pool = PMA(channels=self.feat_dim, num_heads=4, num_seeds=1, layer_norm=True)
+        self.motif_pool = PMA(channels=self.feat_dim, num_heads=4, num_seeds=1)
 
         self.pred_n_layer = max(1, pred_n_layer)
 
