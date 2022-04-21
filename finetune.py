@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 from collections import defaultdict
+from copy import deepcopy
 
 import torch
 from torch import nn
@@ -44,6 +45,13 @@ def _gen_clique_to_mol(clique_list, mol_to_clique):
         for clique in mol_to_clique[mol]:
             clique_to_mol[clique_list.index(clique)].append(mol)
     return clique_to_mol
+
+def _get_training_molecules(train_loader):
+    train_mol = []
+    for data in train_loader:
+        for d in data.to_data_list():
+            train_mol.append(d.mol_index.item())
+    return train_mol
 
 class Normalizer(object):
     """Normalize a Tensor and restore it later. """
@@ -128,14 +136,37 @@ class FineTune(object):
                     mol_to_clique[i][cs] += 1
         return list(clique_set), mol_to_clique
 
+    def _filter_cliques(self, threshold, train_loader, clique_list, mol_to_clique, clique_to_mol):
+        train_mol = _get_training_molecules(train_loader)
+        
+        fil_clique_list = []
+        for i, d in enumerate(clique_list):
+            if sum(mol in train_mol for mol in clique_to_mol[i]) <= threshold:
+                fil_clique_list.append(d)
+        
+        tmol_to_clique = deepcopy(mol_to_clique)
+        for mol in mol_to_clique:
+            for clique in mol_to_clique[mol].keys():
+                if clique in fil_clique_list:
+                    del tmol_to_clique[mol][clique]
+        
+        mol_to_clique = deepcopy(tmol_to_clique)
+        emp_mol = []
+        for mol in tmol_to_clique:
+            if len(tmol_to_clique[mol]) == 0:
+                mol_to_clique[mol]['EMP'] = 1
+                emp_mol.append(mol)
+
+        clique_list = list(set(clique_list) - set(fil_clique_list))
+        return emp_mol, clique_list, mol_to_clique
+
     def train(self):
         smiles_data, train_loader, valid_loader, test_loader = self.dataset.get_data_loaders()
-        #full_data_loader = self.dataset.get_full_data_loader()
 
         clique_list, mol_to_clique = self._gen_cliques(smiles_data)
+        clique_to_mol = _gen_clique_to_mol(clique_list, mol_to_clique)
+        emp_mol, clique_list, mol_to_clique = self._filter_cliques(10, train_loader, clique_list, mol_to_clique, clique_to_mol)
         print("Finished generating motif vocabulary")
-        #clique_to_mol = _gen_clique_to_mol(clique_list, mol_to_clique)
-        num_motifs = len(clique_list)
 
         clique_dataset = MolCliqueDatasetWrapper(clique_list, self.config['batch_size'], self.config['dataset']['num_workers'])
         clique_loader = clique_dataset.get_data_loaders()
@@ -164,8 +195,23 @@ class FineTune(object):
             with torch.no_grad():               
                 feats = torch.cat(feats)
 
+            clique_list.append('EMP')
+
+            emp_feats = []
+            for data in train_loader:
+                data = data.to(self.device)
+                emb, __ = model(data)
+                
+                for i, d in enumerate(data.to_data_list()):
+                    if d.mol_index.item() in emp_mol:
+                        emp_feats.append(emb[i, :])
+
+            emp_feats = torch.unsqueeze(torch.mean(torch.stack(emp_feats), dim=0), 0)
+
+            feats = torch.cat((feats, emp_feats), dim=0)
+
             from models.ginet_finetune_mp import GINet
-            model = GINet(num_motifs, self.config['dataset']['task'], **self.config["model"]).to(self.device)
+            model = GINet(self.config['dataset']['task'], **self.config["model"]).to(self.device)
             model = self._load_pre_trained_weights(model)
             #model.init_motif_emb(feats)
         elif self.config['model_type'] == 'gcn':
@@ -216,19 +262,20 @@ class FineTune(object):
                 #emb_optimizer.zero_grad()
 
                 data = data.to(self.device)
-             
-                mol_idx = []
-                clique_idx = []
-                for i, d in enumerate(data.to_data_list()):
-                    for clique in mol_to_clique[d.mol_index.item()].keys():
-                        mol_idx.append(i)
-                        clique_idx.append(clique_list.index(clique))
-                mol_idx.extend([i for i in range(max(mol_idx) + 1)])
-                mol_idx = torch.tensor(mol_idx).to(self.device)
-                clique_idx = torch.tensor(clique_idx)
+            
+                with torch.no_grad():
+                    mol_idx = []
+                    clique_idx = []
+                    for i, d in enumerate(data.to_data_list()):
+                        for clique in mol_to_clique[d.mol_index.item()].keys():
+                            mol_idx.append(i)
+                            clique_idx.append(clique_list.index(clique))
+                    mol_idx.extend([i for i in range(max(mol_idx) + 1)])
+                    mol_idx = torch.tensor(mol_idx).to(self.device)
+                    clique_idx = torch.tensor(clique_idx)
                 
-                motif_samples = motif_embed(clique_idx).to(self.device)
-
+                    motif_samples = motif_embed(clique_idx).to(self.device)
+    
                 optimizer.zero_grad()
                 emb_optimizer.zero_grad()
 
@@ -293,17 +340,18 @@ class FineTune(object):
             for bn, data in enumerate(valid_loader):
                 data = data.to(self.device)
 
-                mol_idx = []
-                clique_idx = []
-                for i, d in enumerate(data.to_data_list()):
-                    for clique in mol_to_clique[d.mol_index.item()].keys():
-                        mol_idx.append(i)
-                        clique_idx.append(clique_list.index(clique))
-                mol_idx.extend([i for i in range(max(mol_idx) + 1)])
-                mol_idx = torch.tensor(mol_idx).to(self.device)
-                clique_idx = torch.tensor(clique_idx)
+                with torch.no_grad():
+                    mol_idx = []
+                    clique_idx = []
+                    for i, d in enumerate(data.to_data_list()):
+                        for clique in mol_to_clique[d.mol_index.item()].keys():
+                            mol_idx.append(i)
+                            clique_idx.append(clique_list.index(clique))
+                    mol_idx.extend([i for i in range(max(mol_idx) + 1)])
+                    mol_idx = torch.tensor(mol_idx).to(self.device)
+                    clique_idx = torch.tensor(clique_idx)
 
-                motif_samples = motif_emb_tensor.index_select(0, clique_idx).to(self.device)
+                    motif_samples = motif_emb_tensor.index_select(0, clique_idx).to(self.device)
 
                 __, pred = model(data, mol_idx, motif_samples)
                 loss = self._step(model, data, bn, mol_idx, motif_samples)
@@ -361,17 +409,18 @@ class FineTune(object):
             for bn, data in enumerate(test_loader):
                 data = data.to(self.device)
 
-                mol_idx = []
-                clique_idx = []
-                for i, d in enumerate(data.to_data_list()):
-                    for clique in mol_to_clique[d.mol_index.item()].keys():
-                        mol_idx.append(i)
-                        clique_idx.append(clique_list.index(clique))
-                mol_idx.extend([i for i in range(max(mol_idx) + 1)])
-                mol_idx = torch.tensor(mol_idx).to(self.device)
-                clique_idx = torch.tensor(clique_idx)
+                with torch.no_grad():
+                    mol_idx = []
+                    clique_idx = []
+                    for i, d in enumerate(data.to_data_list()):
+                        for clique in mol_to_clique[d.mol_index.item()].keys():
+                            mol_idx.append(i)
+                            clique_idx.append(clique_list.index(clique))
+                    mol_idx.extend([i for i in range(max(mol_idx) + 1)])
+                    mol_idx = torch.tensor(mol_idx).to(self.device)
+                    clique_idx = torch.tensor(clique_idx)
 
-                motif_samples = motif_emb_tensor.index_select(0, clique_idx).to(self.device)
+                    motif_samples = motif_emb_tensor.index_select(0, clique_idx).to(self.device)
 
                 __, pred = model(data, mol_idx, motif_samples)
                 loss = self._step(model, data, bn, mol_idx, motif_samples)

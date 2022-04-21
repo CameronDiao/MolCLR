@@ -108,7 +108,6 @@ def read_smiles(data_path, target, task):
                         labels.append(float(label))
                     else:
                         ValueError('task must be either regression or classification')
-    print(len(smiles_data))
     return smiles_data, labels
 
 class MolTestDataset(Dataset):

@@ -316,11 +316,10 @@ class GINet(nn.Module):
         node representations
     """
     def __init__(self, 
-        num_motifs, task='classification', num_layer=5, emb_dim=300, feat_dim=512, 
+        task='classification', num_layer=5, emb_dim=300, feat_dim=512, 
         drop_ratio=0, pool='mean', pred_n_layer=2, pred_act='softplus'
     ):
         super(GINet, self).__init__()
-        self.num_motifs = num_motifs
         self.num_layer = num_layer
         self.emb_dim = emb_dim
         self.feat_dim = feat_dim
@@ -331,8 +330,6 @@ class GINet(nn.Module):
         self.x_embedding2 = nn.Embedding(num_chirality_tag, emb_dim)
         nn.init.xavier_uniform_(self.x_embedding1.weight.data)
         nn.init.xavier_uniform_(self.x_embedding2.weight.data)
-
-        #self.motif_embedding = nn.Embedding(num_motifs, feat_dim)
 
         # List of MLPs
         self.gnns = nn.ModuleList()
@@ -367,7 +364,7 @@ class GINet(nn.Module):
         #                                           out_channels=self.feat_dim, pool_sequences=["GMPool_I"])
         
         #self.motif_trans = SAB(in_channels=self.feat_dim, out_channels=self.feat_dim, num_heads=4)
-        self.motif_pool = PMA(channels=self.feat_dim, num_heads=4, num_seeds=1, layer_norm=True)
+        self.motif_pool = PMA(channels=self.feat_dim, num_heads=2, num_seeds=1)
 
         self.pred_n_layer = max(1, pred_n_layer)
 
