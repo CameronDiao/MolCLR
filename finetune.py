@@ -154,7 +154,8 @@ class FineTune(object):
         emp_mol = []
         for mol in tmol_to_clique:
             if len(tmol_to_clique[mol]) == 0:
-                mol_to_clique[mol]['EMP'] = 1
+                mol_to_clique[mol]['EMP0'] = 1
+                mol_to_clique[mol]['EMP1'] = 1
                 emp_mol.append(mol)
 
         clique_list = list(set(clique_list) - set(fil_clique_list))
@@ -164,9 +165,11 @@ class FineTune(object):
         smiles_data, train_loader, valid_loader, test_loader = self.dataset.get_data_loaders()
 
         clique_list, mol_to_clique = self._gen_cliques(smiles_data)
+        
         clique_to_mol = _gen_clique_to_mol(clique_list, mol_to_clique)
         emp_mol, clique_list, mol_to_clique = self._filter_cliques(10, train_loader, clique_list, mol_to_clique, clique_to_mol)
         print("Finished generating motif vocabulary")
+        print("Number of 'empty' molecules: ", len(emp_mol))
 
         clique_dataset = MolCliqueDatasetWrapper(clique_list, self.config['batch_size'], self.config['dataset']['num_workers'])
         clique_loader = clique_dataset.get_data_loaders()
@@ -195,20 +198,31 @@ class FineTune(object):
             with torch.no_grad():               
                 feats = torch.cat(feats)
 
-            clique_list.append('EMP')
+            clique_list.append('EMP0')
+            clique_list.append('EMP1')
 
             emp_feats = []
+            labels = []
             for data in train_loader:
                 data = data.to(self.device)
                 emb, __ = model(data)
-                
-                for i, d in enumerate(data.to_data_list()):
-                    if d.mol_index.item() in emp_mol:
-                        emp_feats.append(emb[i, :])
+                emp_feats.append(emb)
+                labels.append(data.y)
+            
+            #for i, d in enumerate(data.to_data_list()):
+            #        if d.mol_index.item() in emp_mol:
+            #            emp_feats.append(emb[i, :])
 
-            emp_feats = torch.unsqueeze(torch.mean(torch.stack(emp_feats), dim=0), 0)
+            emp_feats = torch.cat(emp_feats)
+            labels = torch.cat(labels)
 
-            feats = torch.cat((feats, emp_feats), dim=0)
+            emp_init0 = torch.mean(emp_feats[torch.nonzero(labels == 0)[:, 0]], dim=0)
+            emp_init1 = torch.mean(emp_feats[torch.nonzero(labels == 1)[:, 0]], dim=0)
+            emp_init = torch.vstack((emp_init0, emp_init1))
+
+            #emp_feats = torch.unsqueeze(torch.mean(torch.stack(emp_feats), dim=0), 0)
+
+            feats = torch.cat((feats, emp_init), dim=0)
 
             from models.ginet_finetune_mp import GINet
             model = GINet(self.config['dataset']['task'], **self.config["model"]).to(self.device)
