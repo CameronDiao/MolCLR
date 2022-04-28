@@ -127,12 +127,17 @@ class PMA(torch.nn.Module):
         self.S = torch.nn.Parameter(torch.Tensor(1, num_seeds, channels))
         self.mab = MAB(channels, channels, channels, num_heads, Conv=Conv,
                        layer_norm=layer_norm)
-
+        #self.mlp = nn.Sequential(nn.Linear(channels, channels),
+        #                         nn.ReLU(),
+        #                         nn.Linear(channels, channels))
         self.reset_parameters()
 
     def reset_parameters(self):
         torch.nn.init.xavier_uniform_(self.S)
         self.mab.reset_parameters()
+        #for layer in self.mlp:
+        #    if isinstance(layer, nn.Linear):
+        #        nn.init.xavier_uniform_(layer.weight)
 
     def forward(
         self,
@@ -140,8 +145,9 @@ class PMA(torch.nn.Module):
         graph: Optional[Tuple[Tensor, Tensor, Tensor]] = None,
         mask: Optional[Tensor] = None,
     ) -> Tensor:
-        return self.mab(self.S.repeat(x.size(0), 1, 1), x, graph, mask)
-
+        x = self.mab(self.S.repeat(x.size(0), 1, 1), x, graph, mask)
+        return x.squeeze(1)
+        #return self.mlp(x.squeeze(1))
 
 class GraphMultisetTransformer(torch.nn.Module):
     r"""The global Graph Multiset Transformer pooling operator from the
@@ -353,20 +359,22 @@ class GINet(nn.Module):
             out_dim = 2
         elif self.task == 'regression':
             out_dim = 1
-        
-        #self.motif_lin1 = nn.Linear(self.feat_dim, self.feat_dim)
-        #nn.init.xavier_uniform_(self.motif_lin1.weight.data)
+      
+        #self.motif_norm = LayerNorm(self.feat_dim) 
 
-        #self.motif_lin2 = nn.Linear(self.feat_dim, self.feat_dim)
-        #nn.init.xavier_uniform_(self.motif_lin2.weight.data)
+        #self.motif_lin = nn.Linear(self.feat_dim, self.feat_dim)
+        #nn.init.xavier_uniform_(self.motif_lin.weight)
+
+        #self.motif_mlp = nn.Sequential(nn.Linear(self.feat_dim, self.feat_dim),
+        #                               nn.Softplus(),
+        #                               nn.Linear(self.feat_dim, self.feat_dim))
 
         #self.motif_pool = GlobalAttention(gate_nn=nn.Sequential(nn.Linear(self.feat_dim, 1)),
         #                                  nn=nn.Sequential(nn.Linear(self.feat_dim, self.feat_dim//2)))
 
         #self.motif_pool = GraphMultisetTransformer(in_channels=self.feat_dim, hidden_channels=self.feat_dim,
-        #                                           out_channels=self.feat_dim, pool_sequences=["GMPool_I"])
+        #                                           out_channels=self.feat_dim, pool_sequences=["GMPool_I", "SelfAtt"])
         
-        #self.motif_trans = SAB(in_channels=self.feat_dim, out_channels=self.feat_dim, num_heads=4)
         self.motif_pool = PMA(channels=self.feat_dim, num_heads=4, num_seeds=1)
 
         self.pred_n_layer = max(1, pred_n_layer)
@@ -418,31 +426,14 @@ class GINet(nn.Module):
         h = self.pool(h, data.batch)
         h = self.feat_lin(h)
 
+        #hp = motif_samples
         hp = torch.cat((motif_samples, h), dim=0)
-        #hp = self.motif_lin1(hp)
         batch, mask = to_dense_batch(hp, mol_idx)
         mask = (~mask).unsqueeze(1).to(dtype=hp.dtype) * -1e9
-        batch = self.motif_pool(batch, None, mask)
-        #mask = None
-        #batch = self.motif_trans(batch, None, mask)
-        hp = batch.squeeze(1)
-        #hp = self.motif_lin2(hp)
-        
-        #h1 = batch[:, 0, :]
-        #h2 = batch[:, 1, :]
-        #h1 = torch.cat((h, h1), dim=1)
-        #h2 = torch.cat((h, h2), dim=1)
-        
-        #p = torch.cat((self.pred_head(h1), self.pred_head(h2)), dim=1)
+        hp = self.motif_pool(batch, None, mask)
 
-        #return h, p
-        
         hp = torch.cat((h, hp), dim=1)
         return h, self.pred_head(hp)
-
-        #h = torch.cat((h, hp), dim=1)
-
-        #return h, p 
 
     def load_my_state_dict(self, state_dict):
         own_state = self.state_dict()

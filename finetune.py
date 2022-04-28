@@ -153,6 +153,7 @@ class FineTune(object):
         mol_to_clique = deepcopy(tmol_to_clique)
         emp_mol = []
         for mol in tmol_to_clique:
+            #if all(clique in fil_clique_list for clique in mol_to_clique[mol]):
             if len(tmol_to_clique[mol]) == 0:
                 mol_to_clique[mol]['EMP0'] = 1
                 mol_to_clique[mol]['EMP1'] = 1
@@ -198,21 +199,24 @@ class FineTune(object):
             with torch.no_grad():               
                 feats = torch.cat(feats)
 
-            clique_list.append('EMP0')
-            clique_list.append('EMP1')
+            clique_list.append("EMP0")
+            clique_list.append("EMP1")
 
             emp_feats = []
             labels = []
             for data in train_loader:
                 data = data.to(self.device)
                 emb, __ = model(data)
+                #for i, d in enumerate(data.to_data_list()):
+                #    if d.mol_index.item() in emp_mol:
+                #        emp_feats.append(emb[i, :])
+                #        labels.append(data.y[i, :])
+                data = data.to(self.device)
+                emb, __ = model(data)
                 emp_feats.append(emb)
                 labels.append(data.y)
             
-            #for i, d in enumerate(data.to_data_list()):
-            #        if d.mol_index.item() in emp_mol:
-            #            emp_feats.append(emb[i, :])
-
+            #emp_feats = torch.stack(emp_feats)
             emp_feats = torch.cat(emp_feats)
             labels = torch.cat(labels)
 
