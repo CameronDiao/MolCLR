@@ -14,7 +14,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from sklearn.metrics import roc_auc_score, mean_squared_error, mean_absolute_error
 
 from dataset.dataset_test import MolTestDatasetWrapper
-
+from utils.nt_xent import NTXentLoss
 
 apex_support = False
 try:
@@ -68,6 +68,7 @@ class FineTune(object):
         self.dataset = dataset
         if config['dataset']['task'] == 'classification':
             self.criterion = nn.CrossEntropyLoss()
+            #self.criterion = nn.CrossEntropyLoss(reduction='sum')
         elif config['dataset']['task'] == 'regression':
             if self.config["task_name"] in ['qm7', 'qm8', 'qm9']:
                 self.criterion = nn.L1Loss()
