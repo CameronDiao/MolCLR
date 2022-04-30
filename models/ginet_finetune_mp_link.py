@@ -98,6 +98,27 @@ class MAB(torch.nn.Module):
 
         return out
 
+
+class SAB(torch.nn.Module):
+    r"""Self-Attention Block."""
+    def __init__(self, in_channels: int, out_channels: int, num_heads: int,
+                 Conv: Optional[Type] = None, layer_norm: bool = False):
+        super().__init__()
+        self.mab = MAB(in_channels, in_channels, out_channels, num_heads,
+                       Conv=Conv, layer_norm=layer_norm)
+
+    def reset_parameters(self):
+        self.mab.reset_parameters()
+
+    def forward(
+        self,
+        x: Tensor,
+        graph: Optional[Tuple[Tensor, Tensor, Tensor]] = None,
+        mask: Optional[Tensor] = None,
+    ) -> Tensor:
+        return self.mab(x, x, graph, mask)
+
+
 class PMA(torch.nn.Module):
     r"""Graph pooling with Multihead-Attention."""
     def __init__(self, channels: int, num_heads: int, num_seeds: int,
@@ -128,12 +149,138 @@ class PMA(torch.nn.Module):
         return x.squeeze(1)
         #return self.mlp(x.squeeze(1))
 
+class GraphMultisetTransformer(torch.nn.Module):
+    r"""The global Graph Multiset Transformer pooling operator from the
+    `"Accurate Learning of Graph Representations
+    with Graph Multiset Pooling" <https://arxiv.org/abs/2102.11533>`_ paper.
+
+    The Graph Multiset Transformer clusters nodes of the entire graph via
+    attention-based pooling operations (:obj:`"GMPool_G"` or
+    :obj:`"GMPool_I"`).
+    In addition, self-attention (:obj:`"SelfAtt"`) can be used to calculate
+    the inter-relationships among nodes.
+
+    Args:
+        in_channels (int): Size of each input sample.
+        hidden_channels (int): Size of each hidden sample.
+        out_channels (int): Size of each output sample.
+        conv (Type, optional): A graph neural network layer
+            for calculating hidden representations of nodes for
+            :obj:`"GMPool_G"` (one of
+            :class:`~torch_geometric.nn.conv.GCNConv`,
+            :class:`~torch_geometric.nn.conv.GraphConv` or
+            :class:`~torch_geometric.nn.conv.GATConv`).
+            (default: :class:`~torch_geometric.nn.conv.GCNConv`)
+        num_nodes (int, optional): The number of average
+            or maximum nodes. (default: :obj:`300`)
+        pooling_ratio (float, optional): Graph pooling ratio
+            for each pooling. (default: :obj:`0.25`)
+        pool_sequences ([str], optional): A sequence of pooling layers
+            consisting of Graph Multiset Transformer submodules (one of
+            :obj:`["GMPool_I"]`,
+            :obj:`["GMPool_G"]`,
+            :obj:`["GMPool_G", "GMPool_I"]`,
+            :obj:`["GMPool_G", "SelfAtt", "GMPool_I"]` or
+            :obj:`["GMPool_G", "SelfAtt", "SelfAtt", "GMPool_I"]`).
+            (default: :obj:`["GMPool_G", "SelfAtt", "GMPool_I"]`)
+        num_heads (int, optional): Number of attention heads.
+            (default: :obj:`4`)
+        layer_norm (bool, optional): If set to :obj:`True`, will make use of
+            layer normalization. (default: :obj:`False`)
+
+    Shapes:
+        - **input:**
+          node features :math:`(|\mathcal{V}|, F_{in})`,
+          batch vector :math:`(|\mathcal{V}|)`,
+          edge indices :math:`(2, |\mathcal{E}|)` *(optional)*
+        - **output:** graph features :math:`(|\mathcal{G}|, F_{out})` where
+          :math:`|\mathcal{G}|` denotes the number of graphs in the batch
+    """
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int,
+        out_channels: int,
+        Conv: Optional[Type] = None,
+        num_nodes: int = 300,
+        pooling_ratio: float = 0.25,
+        pool_sequences: List[str] = ['GMPool_G', 'SelfAtt', 'GMPool_I'],
+        num_heads: int = 4,
+        layer_norm: bool = False,
+    ):
+        super().__init__()
+        self.in_channels = in_channels
+        self.hidden_channels = hidden_channels
+        self.out_channels = out_channels
+        self.Conv = Conv or GCNConv
+        self.num_nodes = num_nodes
+        self.pooling_ratio = pooling_ratio
+        self.pool_sequences = pool_sequences
+        self.num_heads = num_heads
+        self.layer_norm = layer_norm
+
+        self.lin1 = Linear(in_channels, hidden_channels)
+        self.lin2 = Linear(hidden_channels, out_channels)
+
+        self.pools = torch.nn.ModuleList()
+        num_out_nodes = math.ceil(num_nodes * pooling_ratio)
+        for i, pool_type in enumerate(pool_sequences):
+            if pool_type not in ['GMPool_G', 'GMPool_I', 'SelfAtt']:
+                raise ValueError("Elements in 'pool_sequences' should be one "
+                                 "of 'GMPool_G', 'GMPool_I', or 'SelfAtt'")
+
+            if i == len(pool_sequences) - 1:
+                num_out_nodes = 1
+
+            if pool_type == 'GMPool_G':
+                self.pools.append(
+                    PMA(hidden_channels, num_heads, num_out_nodes,
+                        Conv=self.Conv, layer_norm=layer_norm))
+                num_out_nodes = math.ceil(num_out_nodes * self.pooling_ratio)
+
+            elif pool_type == 'GMPool_I':
+                self.pools.append(
+                    PMA(hidden_channels, num_heads, num_out_nodes, Conv=None,
+                        layer_norm=layer_norm))
+                num_out_nodes = math.ceil(num_out_nodes * self.pooling_ratio)
+
+            elif pool_type == 'SelfAtt':
+                self.pools.append(
+                    SAB(hidden_channels, hidden_channels, num_heads, Conv=None,
+                        layer_norm=layer_norm))
+
+    def reset_parameters(self):
+        self.lin1.reset_parameters()
+        self.lin2.reset_parameters()
+        for pool in self.pools:
+            pool.reset_parameters()
+
+
+    def forward(self, x: Tensor, batch: Tensor,
+                edge_index: Optional[Tensor] = None) -> Tensor:
+        """"""
+        x = self.lin1(x)
+        batch_x, mask = to_dense_batch(x, batch)
+        mask = (~mask).unsqueeze(1).to(dtype=x.dtype) * -1e9
+
+        for i, (name, pool) in enumerate(zip(self.pool_sequences, self.pools)):
+            graph = (x, edge_index, batch) if name == 'GMPool_G' else None
+            batch_x = pool(batch_x, graph, mask)
+            mask = None
+
+        return self.lin2(batch_x.squeeze(1))
+
+
+    def __repr__(self) -> str:
+        return (f'{self.__class__.__name__}({self.in_channels}, '
+                f'{self.out_channels}, pool_sequences={self.pool_sequences})')
+
 class GINEConv(MessagePassing):
     def __init__(self, emb_dim):
         super(GINEConv, self).__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(emb_dim, 2*emb_dim),
-            nn.ReLU(),
+            nn.Linear(emb_dim, 2*emb_dim), 
+            nn.ReLU(), 
             nn.Linear(2*emb_dim, emb_dim)
         )
         self.edge_embedding1 = nn.Embedding(num_bond_type, emb_dim)
@@ -208,21 +355,52 @@ class GINet(nn.Module):
             self.pool = global_add_pool
 
         self.feat_lin = nn.Linear(self.emb_dim, self.feat_dim)
+        if self.task == 'classification':
+            out_dim = 2
+        elif self.task == 'regression':
+            out_dim = 1
+     
+        self.label_lin = nn.Linear(self.feat_dim, self.feat_dim)
+        nn.init.xavier_uniform_(self.label_lin.weight.data)
 
-        self.out_lin = nn.Sequential(
-            nn.Linear(self.feat_dim, self.feat_dim),
-            nn.ReLU(inplace=True),
-            # nn.Softplus(),
-            nn.Linear(self.feat_dim, self.feat_dim//2)
-        )
+        self.motif_pool = PMA(channels=self.feat_dim, num_heads=4, num_seeds=1)
 
-        #self.motif_pool = PMA(channels=self.feat_dim, num_heads=4, num_seeds=1)
+        self.pred_n_layer = max(1, pred_n_layer)
 
-    def forward(self, data, label_emb):
+        if pred_act == 'relu':
+            pred_head = [
+                nn.Linear(2 * self.feat_dim, self.feat_dim//2), 
+                nn.ReLU(inplace=True)
+            ]
+            for _ in range(self.pred_n_layer - 1):
+                pred_head.extend([
+                    nn.Linear(self.feat_dim//2, self.feat_dim//2), 
+                    nn.ReLU(inplace=True),
+                ])
+        elif pred_act == 'softplus':
+            pred_head = [
+                nn.Linear(2 * self.feat_dim, self.feat_dim//2), 
+                nn.Softplus()
+            ]
+            for _ in range(self.pred_n_layer - 1):
+                pred_head.extend([
+                    nn.Linear(self.feat_dim//2, self.feat_dim//2), 
+                    nn.Softplus()
+                ])
+        else:
+            raise ValueError('Undefined activation function')
+        
+        pred_head.append(nn.Linear(self.feat_dim//2, out_dim))
+        self.pred_head = nn.Sequential(*pred_head)
+
+    #def init_motif_emb(self, init):
+    #    with torch.no_grad():
+    #        self.motif_embedding.weight.data = nn.Parameter(init)
+    
+    def forward(self, data, mol_idx, motif_embed, label_embed):
         x = data.x
         edge_index = data.edge_index
         edge_attr = data.edge_attr
-
         h = self.x_embedding1(x[:,0]) + self.x_embedding2(x[:,1])
 
         for layer in range(self.num_layer):
@@ -235,6 +413,30 @@ class GINet(nn.Module):
 
         h = self.pool(h, data.batch)
         h = self.feat_lin(h)
-        out = self.out_lin(h)
 
-        return h, out
+        h = torch.cat((motif_embed, h), dim=0)
+        batch, mask = to_dense_batch(h, mol_idx)
+        mask = (~mask).unsqueeze(1).to(dtype=h.dtype) * -1e9
+        h = self.motif_pool(batch, None, mask)
+
+        h0 = torch.squeeze(label_embed[0])
+        h0 = self.label_lin(h0)
+        h1 = torch.squeeze(label_embed[1])
+        h1 = self.label_lin(h1)
+
+        h0 = torch.cat((h, h0), dim=1)
+        h1 = torch.cat((h, h1), dim=1)
+
+        hp = torch.cat((self.pred_head(h0), self.pred_head(h1)), dim=1)
+
+        return h, hp
+
+    def load_my_state_dict(self, state_dict):
+        own_state = self.state_dict()
+        for name, param in state_dict.items():
+            if name not in own_state:
+                continue
+            if isinstance(param, nn.parameter.Parameter):
+                # backwards compatibility for serialized parameters
+                param = param.data
+            own_state[name].copy_(param)
