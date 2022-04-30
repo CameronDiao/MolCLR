@@ -245,7 +245,7 @@ class FineTune(object):
                     loss.backward()
 
                 optimizer.step()
-                emb_optimizer.zero_grad()
+                emb_optimizer.step()
                 n_iter += 1
 
             # validate the model if requested
