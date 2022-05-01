@@ -356,7 +356,9 @@ class GINet(nn.Module):
             out_dim = 2
         elif self.task == 'regression':
             out_dim = 1
-        
+       
+        self.motif_norm = LayerNorm(self.feat_dim)
+
         #self.motif_lin = nn.Linear(self.feat_dim, self.feat_dim//2)
         #nn.init.xavier_uniform_(self.motif_lin.weight.data)
 
@@ -367,7 +369,7 @@ class GINet(nn.Module):
         #                                           out_channels=self.feat_dim, pool_sequences=["GMPool_I"])
         
         #self.motif_trans = SAB(in_channels=self.feat_dim, out_channels=self.feat_dim, num_heads=4)
-        self.motif_pool = PMA(channels=self.feat_dim, num_heads=4, num_seeds=1, layer_norm=True)
+        self.motif_pool = PMA(channels=self.feat_dim, num_heads=4, num_seeds=1)
 
         self.pred_n_layer = max(1, pred_n_layer)
 
@@ -422,7 +424,7 @@ class GINet(nn.Module):
         #hp = self.motif_lin(hp)
         batch, mask = to_dense_batch(hp, mol_idx)
         mask = (~mask).unsqueeze(1).to(dtype=hp.dtype) * -1e9
-        batch = self.motif_pool(batch, None, mask)
+        batch = self.motif_pool(self.motif_norm(batch), None, mask)
         #mask = None
         #batch = self.motif_trans(batch, None, mask)
         hp = batch.squeeze(1)
