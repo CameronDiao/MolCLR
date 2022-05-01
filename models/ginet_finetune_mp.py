@@ -356,7 +356,9 @@ class GINet(nn.Module):
             out_dim = 2
         elif self.task == 'regression':
             out_dim = 1
-        
+
+        #self.motif_norm = LayerNorm(self.feat_dim)
+
         #self.motif_lin = nn.Linear(self.feat_dim, self.feat_dim//2)
         #nn.init.xavier_uniform_(self.motif_lin.weight.data)
 

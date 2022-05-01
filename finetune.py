@@ -257,7 +257,7 @@ class FineTune(object):
                     loss.backward()
 
                 optimizer.step()
-                emb_optimizer.zero_grad()
+                emb_optimizer.step()
                 n_iter += 1
 
             # validate the model if requested
@@ -534,15 +534,16 @@ if __name__ == "__main__":
 
     print(config)
 
-    results_list = []
-    for target in target_list:
-        config['dataset']['target'] = target
-        result = main(config)
-        results_list.append([target, result])
+    for _ in range(10):
+        results_list = []
+        for target in target_list:
+            config['dataset']['target'] = target
+            result = main(config)
+            results_list.append([target, result])
 
-    os.makedirs('experiments', exist_ok=True)
-    df = pd.DataFrame(results_list)
-    df.to_csv(
-        'experiments/{}_{}_finetune.csv'.format(config['fine_tune_from'], config['task_name']), 
-        mode='a', index=False, header=False
-    )
+    #os.makedirs('experiments', exist_ok=True)
+    #df = pd.DataFrame(results_list)
+    #df.to_csv(
+    #    'experiments/{}_{}_finetune.csv'.format(config['fine_tune_from'], config['task_name']), 
+    #    mode='a', index=False, header=False
+    #)
