@@ -353,12 +353,6 @@ class GINet(nn.Module):
             out_dim = 2
         elif self.task == 'regression':
             out_dim = 1
-        
-        #self.motif_lin1 = nn.Linear(self.feat_dim, self.feat_dim)
-        #nn.init.xavier_uniform_(self.motif_lin1.weight.data)
-
-        #self.motif_lin2 = nn.Linear(self.feat_dim, self.feat_dim)
-        #nn.init.xavier_uniform_(self.motif_lin2.weight.data)
 
         #self.motif_pool = GlobalAttention(gate_nn=nn.Sequential(nn.Linear(self.feat_dim, 1)),
         #                                  nn=nn.Sequential(nn.Linear(self.feat_dim, self.feat_dim//2)))
@@ -419,15 +413,13 @@ class GINet(nn.Module):
         h = self.feat_lin(h)
 
         hp = torch.cat((motif_samples, h), dim=0)
-        #hp = self.motif_lin1(hp)
         batch, mask = to_dense_batch(hp, mol_idx)
         mask = (~mask).unsqueeze(1).to(dtype=hp.dtype) * -1e9
         batch = self.motif_pool(batch, None, mask)
         #mask = None
         #batch = self.motif_trans(batch, None, mask)
         hp = batch.squeeze(1)
-        #hp = self.motif_lin2(hp)
-        
+
         #h1 = batch[:, 0, :]
         #h2 = batch[:, 1, :]
         #h1 = torch.cat((h, h1), dim=1)

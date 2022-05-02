@@ -153,6 +153,7 @@ class FineTune(object):
         mol_to_clique = deepcopy(tmol_to_clique)
         emp_mol = []
         for mol in tmol_to_clique:
+            #if all(clique in fil_clique_list for clique in tmol_to_clique[mol]):
             if len(tmol_to_clique[mol]) == 0:
                 mol_to_clique[mol]['EMP0'] = 1
                 mol_to_clique[mol]['EMP1'] = 1
@@ -198,31 +199,37 @@ class FineTune(object):
             with torch.no_grad():               
                 feats = torch.cat(feats)
 
+            #for mol in mol_to_clique:
+            #    mol_to_clique[mol].update({'EMP0': 1, 'EMP1': 1})
+
             clique_list.append('EMP0')
             clique_list.append('EMP1')
 
-            emp_feats = []
+            label_feats = []
             labels = []
             for data in train_loader:
                 data = data.to(self.device)
                 emb, __ = model(data)
-                emp_feats.append(emb)
+                label_feats.append(emb)
                 labels.append(data.y)
             
-            #for i, d in enumerate(data.to_data_list()):
-            #        if d.mol_index.item() in emp_mol:
-            #            emp_feats.append(emb[i, :])
+                #for i, d in enumerate(data.to_data_list()):
+                #        if d.mol_index.item() in emp_mol:
+                #            label_feats.append(feats[i, :])
+                #            labels.append(d.y)
 
-            emp_feats = torch.cat(emp_feats)
-            labels = torch.cat(labels)
+            with torch.no_grad():
+                label_feats = torch.cat(label_feats)
+                #label_feats = torch.stack(label_feats)
+                labels = torch.cat(labels)
 
-            emp_init0 = torch.mean(emp_feats[torch.nonzero(labels == 0)[:, 0]], dim=0)
-            emp_init1 = torch.mean(emp_feats[torch.nonzero(labels == 1)[:, 0]], dim=0)
-            emp_init = torch.vstack((emp_init0, emp_init1))
+                label_init0 = torch.mean(label_feats[torch.nonzero(labels == 0)[:, 0]], dim=0)
+                label_init1 = torch.mean(label_feats[torch.nonzero(labels == 1)[:, 0]], dim=0)
+                label_init = torch.vstack((label_init0, label_init1))
 
-            #emp_feats = torch.unsqueeze(torch.mean(torch.stack(emp_feats), dim=0), 0)
+                #label_feats = torch.unsqueeze(torch.mean(torch.stack(label_feats), dim=0), 0)
 
-            feats = torch.cat((feats, emp_init), dim=0)
+                feats = torch.cat((feats, label_init), dim=0)
 
             from models.ginet_finetune_mp import GINet
             model = GINet(self.config['dataset']['task'], **self.config["model"]).to(self.device)
@@ -288,7 +295,7 @@ class FineTune(object):
                     mol_idx = torch.tensor(mol_idx).to(self.device)
                     clique_idx = torch.tensor(clique_idx)
                 
-                    motif_samples = motif_embed(clique_idx).to(self.device)
+                motif_samples = motif_embed(clique_idx).to(self.device)
     
                 optimizer.zero_grad()
                 emb_optimizer.zero_grad()
@@ -304,9 +311,8 @@ class FineTune(object):
                         scaled_loss.backward()
                 else:
                     loss.backward()
-
                 optimizer.step()
-                emb_optimizer.zero_grad()
+                emb_optimizer.step()
                 n_iter += 1
 
             # validate the model if requested
@@ -365,7 +371,7 @@ class FineTune(object):
                     mol_idx = torch.tensor(mol_idx).to(self.device)
                     clique_idx = torch.tensor(clique_idx)
 
-                    motif_samples = motif_emb_tensor.index_select(0, clique_idx).to(self.device)
+                motif_samples = motif_emb_tensor.index_select(0, clique_idx).to(self.device)
 
                 __, pred = model(data, mol_idx, motif_samples)
                 loss = self._step(model, data, bn, mol_idx, motif_samples)
@@ -434,7 +440,7 @@ class FineTune(object):
                     mol_idx = torch.tensor(mol_idx).to(self.device)
                     clique_idx = torch.tensor(clique_idx)
 
-                    motif_samples = motif_emb_tensor.index_select(0, clique_idx).to(self.device)
+                motif_samples = motif_emb_tensor.index_select(0, clique_idx).to(self.device)
 
                 __, pred = model(data, mol_idx, motif_samples)
                 loss = self._step(model, data, bn, mol_idx, motif_samples)
@@ -585,15 +591,16 @@ if __name__ == "__main__":
 
     print(config)
 
-    results_list = []
-    for target in target_list:
-        config['dataset']['target'] = target
-        result = main(config)
-        results_list.append([target, result])
+    for _ in range(10):
+        results_list = []
+        for target in target_list:
+            config['dataset']['target'] = target
+            result = main(config)
+            results_list.append([target, result])
 
-    os.makedirs('experiments', exist_ok=True)
-    df = pd.DataFrame(results_list)
-    df.to_csv(
-        'experiments/{}_{}_finetune.csv'.format(config['fine_tune_from'], config['task_name']), 
-        mode='a', index=False, header=False
-    )
+    #os.makedirs('experiments', exist_ok=True)
+    #df = pd.DataFrame(results_list)
+    #df.to_csv(
+    #    'experiments/{}_{}_finetune.csv'.format(config['fine_tune_from'], config['task_name']), 
+    #    mode='a', index=False, header=False
+    #)
