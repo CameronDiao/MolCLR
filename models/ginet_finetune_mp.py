@@ -127,7 +127,6 @@ class PMA(torch.nn.Module):
         self.S = torch.nn.Parameter(torch.Tensor(1, num_seeds, channels))
         self.mab = MAB(channels, channels, channels, num_heads, Conv=Conv,
                        layer_norm=layer_norm)
-
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -141,7 +140,6 @@ class PMA(torch.nn.Module):
         mask: Optional[Tensor] = None,
     ) -> Tensor:
         return self.mab(self.S.repeat(x.size(0), 1, 1), x, graph, mask)
-
 
 class GraphMultisetTransformer(torch.nn.Module):
     r"""The global Graph Multiset Transformer pooling operator from the
@@ -359,7 +357,7 @@ class GINet(nn.Module):
        
         self.motif_norm = LayerNorm(self.feat_dim)
 
-        #self.motif_lin = nn.Linear(self.feat_dim, self.feat_dim//2)
+        #self.motif_lin = nn.Linear(self.feat_dim, self.feat_dim)
         #nn.init.xavier_uniform_(self.motif_lin.weight.data)
 
         #self.motif_pool = GlobalAttention(gate_nn=nn.Sequential(nn.Linear(self.feat_dim, 1)),
@@ -371,34 +369,45 @@ class GINet(nn.Module):
         #self.motif_trans = SAB(in_channels=self.feat_dim, out_channels=self.feat_dim, num_heads=4)
         self.motif_pool = PMA(channels=self.feat_dim, num_heads=4, num_seeds=1)
 
-        self.pred_n_layer = max(1, pred_n_layer)
+        #self.out_lin = nn.Sequential(
+        #                   nn.Linear(self.feat_dim, self.feat_dim),
+        #                   nn.ReLU(inplace=True),
+        #                   nn.Linear(self.feat_dim, self.feat_dim//2)
+        #               )
 
-        if pred_act == 'relu':
-            pred_head = [
-                nn.Linear(2 * self.feat_dim, self.feat_dim//2), 
-                nn.ReLU(inplace=True)
-            ]
-            for _ in range(self.pred_n_layer - 1):
-                pred_head.extend([
-                    nn.Linear(self.feat_dim//2, self.feat_dim//2), 
-                    nn.ReLU(inplace=True),
-                ])
-        elif pred_act == 'softplus':
-            pred_head = [
-                nn.Linear(2 * self.feat_dim, self.feat_dim//2), 
-                nn.Softplus()
-            ]
-            for _ in range(self.pred_n_layer - 1):
-                pred_head.extend([
-                    nn.Linear(self.feat_dim//2, self.feat_dim//2), 
-                    nn.Softplus()
-                ])
-        else:
-            raise ValueError('Undefined activation function')
+        self.prompt = nn.Linear(self.feat_dim//2, out_dim)
+
+        #self.pred_n_layer = max(1, pred_n_layer)
+
+        #if pred_act == 'relu':
+        #    pred_head = [
+        #        nn.Linear(2 * self.feat_dim, self.feat_dim//2), 
+        #        nn.ReLU(inplace=True)
+        #    ]
+        #    for _ in range(self.pred_n_layer - 1):
+        #        pred_head.extend([
+        #            nn.Linear(self.feat_dim//2, self.feat_dim//2), 
+        #            nn.ReLU(inplace=True),
+        #        ])
+        #elif pred_act == 'softplus':
+        #    pred_head = [
+        #        nn.Linear(2 * self.feat_dim, self.feat_dim//2), 
+        #        nn.Softplus()
+        #    ]
+        #    for _ in range(self.pred_n_layer - 1):
+        #        pred_head.extend([
+        #            nn.Linear(self.feat_dim//2, self.feat_dim//2), 
+        #            nn.Softplus()
+        #        ])
+        #else:
+        #    raise ValueError('Undefined activation function')
         
-        pred_head.append(nn.Linear(self.feat_dim//2, out_dim))
-        self.pred_head = nn.Sequential(*pred_head)
+        #pred_head.append(nn.Linear(self.feat_dim//2, out_dim))
+        #self.pred_head = nn.Sequential(*pred_head)
 
+    def init_prompt_embed(self, init):
+        with torch.no_grad():
+            self.prompt.weight.copy_(init)
     #def init_motif_emb(self, init):
     #    with torch.no_grad():
     #        self.motif_embedding.weight.data = nn.Parameter(init)
@@ -425,26 +434,15 @@ class GINet(nn.Module):
         batch, mask = to_dense_batch(hp, mol_idx)
         mask = (~mask).unsqueeze(1).to(dtype=hp.dtype) * -1e9
         batch = self.motif_pool(self.motif_norm(batch), None, mask)
-        #mask = None
-        #batch = self.motif_trans(batch, None, mask)
         hp = batch.squeeze(1)
         #hp = self.motif_lin(hp)
         
-        #h1 = batch[:, 0, :]
-        #h2 = batch[:, 1, :]
-        #h1 = torch.cat((h, h1), dim=1)
-        #h2 = torch.cat((h, h2), dim=1)
-        
-        #p = torch.cat((self.pred_head(h1), self.pred_head(h2)), dim=1)
+        #hp = torch.cat((h, hp), dim=1)
+        #return h, self.pred_head(hp)
 
-        #return h, p
-        
-        hp = torch.cat((h, hp), dim=1)
-        return h, self.pred_head(hp)
-
-        #h = torch.cat((h, hp), dim=1)
-
-        #return h, p 
+        #hp = self.out_lin(hp)
+        hp = self.prompt(hp)
+        return h, hp
 
     def load_my_state_dict(self, state_dict):
         own_state = self.state_dict()
