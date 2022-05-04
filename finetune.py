@@ -13,6 +13,8 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from sklearn.metrics import roc_auc_score, mean_squared_error, mean_absolute_error
 
+import dgl
+
 from dataset.dataset_test import MolTestDatasetWrapper
 from utils.nt_xent import NTXentLoss
 
@@ -85,13 +87,13 @@ class FineTune(object):
 
         return device
 
-    def _step(self, model, data, n_iter):
+    def _step(self, model, data, n_iter, label_samples):
         # get the prediction
-        __, pred = model(data, self.device)
+        __, pred = model(data, label_samples)
+        #__, pred = model(data, self.device)
         if self.config['dataset']['task'] == 'classification':
             loss = self.criterion(pred, data.y.flatten())
         elif self.config['dataset']['task'] == 'regression':
-            __, pred = model(data)
             if self.normalizer:
                 loss = self.criterion(pred, self.normalizer.norm(data.y))
             else:
@@ -131,12 +133,13 @@ class FineTune(object):
                 init1 = torch.mean(feats[torch.nonzero(labels == 0)[:, 0]], dim=0)
                 init2 = torch.mean(feats[torch.nonzero(labels == 1)[:, 0]], dim=0)
 
-                init = torch.vstack((init1, init2)).to(self.device)
-
+                feats = torch.vstack((init1, init2)).to(self.device)
+            
+            del model
             from models.ginet_finetune_link import GINet
             model = GINet(self.config['dataset']['task'], **self.config["model"]).to(self.device)
             model = self._load_pre_trained_weights(model)
-            model.init_label_emb(init)
+            #model.init_label_emb(init)
         elif self.config['model_type'] == 'gcn':
             from models.gcn_finetune import GCN
             model = GCN(self.config['dataset']['task'], **self.config["model"]).to(self.device)
@@ -151,10 +154,18 @@ class FineTune(object):
         params = list(map(lambda x: x[1],list(filter(lambda kv: kv[0] in layer_list, model.named_parameters()))))
         base_params = list(map(lambda x: x[1],list(filter(lambda kv: kv[0] not in layer_list, model.named_parameters()))))
 
+        def initializer(emb):
+            emb[:] = feats
+            return emb
+        label_embed = dgl.nn.NodeEmbedding(feats.shape[0], feats.shape[1], name="label_embed",
+                                           init_func=initializer)
+
         optimizer = torch.optim.Adam(
             [{'params': base_params, 'lr': self.config['init_base_lr']}, {'params': params}],
             self.config['init_lr'], weight_decay=eval(self.config['weight_decay'])
         )
+
+        label_optimizer = dgl.optim.SparseAdam(params=[label_embed], lr=self.config['init_base_lr'] * 10)
 
         if apex_support and self.config['fp16_precision']:
             model, optimizer = amp.initialize(
@@ -175,9 +186,14 @@ class FineTune(object):
         for epoch_counter in range(self.config['epochs']):
             for bn, data in enumerate(train_loader):
                 optimizer.zero_grad()
+                label_optimizer.zero_grad()
+
+                label_samples = label_embed(torch.zeros(data.num_graphs, dtype=torch.long)).unsqueeze(0)
+                label_samples = torch.cat((label_samples, label_embed(torch.ones(data.num_graphs,\
+                        dtype=torch.long)).unsqueeze(0)), dim=0).to(self.device)
 
                 data = data.to(self.device)
-                loss = self._step(model, data, n_iter)
+                loss = self._step(model, data, n_iter, label_samples)
 
                 if n_iter % self.config['log_every_n_steps'] == 0:
                     self.writer.add_scalar('train_loss', loss, global_step=n_iter)
@@ -190,18 +206,19 @@ class FineTune(object):
                     loss.backward()
 
                 optimizer.step()
+                label_optimizer.step()
                 n_iter += 1
 
             # validate the model if requested
             if epoch_counter % self.config['eval_every_n_epochs'] == 0:
                 if self.config['dataset']['task'] == 'classification': 
-                    valid_loss, valid_cls = self._validate(model, valid_loader)
+                    valid_loss, valid_cls = self._validate(model, valid_loader, label_embed.emb_tensor)
                     if valid_cls > best_valid_cls:
                         # save the model weights
                         best_valid_cls = valid_cls
                         torch.save(model.state_dict(), os.path.join(model_checkpoints_folder, 'model.pth'))
                 elif self.config['dataset']['task'] == 'regression': 
-                    valid_loss, valid_rgr = self._validate(model, valid_loader)
+                    valid_loss, valid_rgr = self._validate(model, valid_loader, label_embed.emb_tensor)
                     if valid_rgr < best_valid_rgr:
                         # save the model weights
                         best_valid_rgr = valid_rgr
@@ -210,7 +227,7 @@ class FineTune(object):
                 self.writer.add_scalar('validation_loss', valid_loss, global_step=valid_n_iter)
                 valid_n_iter += 1
         
-        self._test(model, test_loader)
+        self._test(model, test_loader, label_embed.emb_tensor)
 
     def _load_pre_trained_weights(self, model):
         try:
@@ -224,7 +241,7 @@ class FineTune(object):
 
         return model
 
-    def _validate(self, model, valid_loader):
+    def _validate(self, model, valid_loader, label_emb_tensor):
         predictions = []
         labels = []
         with torch.no_grad():
@@ -235,8 +252,14 @@ class FineTune(object):
             for bn, data in enumerate(valid_loader):
                 data = data.to(self.device)
 
-                __, pred = model(data, self.device)
-                loss = self._step(model, data, bn)
+                label_samples = label_emb_tensor.index_select(0, torch.zeros(data.num_graphs, dtype=torch.long))\
+                        .unsqueeze(0)
+                label_samples = torch.cat((label_samples, label_emb_tensor.index_select(0, torch.ones(data.num_graphs,\
+                        dtype=torch.long)).unsqueeze(0)), dim=0).to(self.device)
+
+                __, pred = model(data, label_samples)
+                #__, pred = model(data, self.device)
+                loss = self._step(model, data, bn, label_samples)
 
                 valid_loss += loss.item() * data.y.size(0)
                 num_data += data.y.size(0)
@@ -274,7 +297,7 @@ class FineTune(object):
             print('Validation loss:', valid_loss, 'ROC AUC:', roc_auc)
             return valid_loss, roc_auc
 
-    def _test(self, model, test_loader):
+    def _test(self, model, test_loader, label_emb_tensor):
         model_path = os.path.join(self.writer.log_dir, 'checkpoints', 'model.pth')
         state_dict = torch.load(model_path, map_location=self.device)
         model.load_state_dict(state_dict)
@@ -291,8 +314,14 @@ class FineTune(object):
             for bn, data in enumerate(test_loader):
                 data = data.to(self.device)
 
-                __, pred = model(data, self.device)
-                loss = self._step(model, data, bn)
+                label_samples = label_emb_tensor.index_select(0, torch.zeros(data.num_graphs, dtype=torch.long))\
+                        .unsqueeze(0)
+                label_samples = torch.cat((label_samples, label_emb_tensor.index_select(0, torch.ones(data.num_graphs,\
+                        dtype=torch.long)).unsqueeze(0)), dim=0).to(self.device)
+                
+                __, pred = model(data, label_samples)
+                #__, pred = model(data, self.device)
+                loss = self._step(model, data, bn, label_samples)
 
                 test_loss += loss.item() * data.y.size(0)
                 num_data += data.y.size(0)
@@ -440,15 +469,16 @@ if __name__ == "__main__":
 
     print(config)
 
-    results_list = []
-    for target in target_list:
-        config['dataset']['target'] = target
-        result = main(config)
-        results_list.append([target, result])
+    for __ in range(10):
+        results_list = []
+        for target in target_list:
+            config['dataset']['target'] = target
+            result = main(config)
+            results_list.append([target, result])
 
-    os.makedirs('experiments', exist_ok=True)
-    df = pd.DataFrame(results_list)
-    df.to_csv(
-        'experiments/{}_{}_finetune.csv'.format(config['fine_tune_from'], config['task_name']), 
-        mode='a', index=False, header=False
-    )
+    #os.makedirs('experiments', exist_ok=True)
+    #df = pd.DataFrame(results_list)
+    #df.to_csv(
+    #    'experiments/{}_{}_finetune.csv'.format(config['fine_tune_from'], config['task_name']), 
+    #    mode='a', index=False, header=False
+    #)
