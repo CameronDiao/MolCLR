@@ -96,14 +96,13 @@ class FineTune(object):
 
         return device
 
-    def _step(self, model, data, n_iter, mol_idx, motif_samples):
+    def _step(self, model, data, n_iter, mol_idx, motif_samples, label_samples):
         
         # get the prediction
-        __, pred = model(data, mol_idx, motif_samples)
+        __, pred = model(data, mol_idx, motif_samples, label_samples)
         if self.config['dataset']['task'] == 'classification':
             loss = self.criterion(pred, data.y.flatten())
         elif self.config['dataset']['task'] == 'regression':
-            __, pred = model(data)
             if self.normalizer:
                 loss = self.criterion(pred, self.normalizer.norm(data.y))
             else:
@@ -155,19 +154,36 @@ class FineTune(object):
             model = GINet(self.config['dataset']['task'], **self.config["model"]).to(self.device)
             model = self._load_pre_trained_weights(model)
             
-            feats = []
+            motif_feats = []
             for c in clique_loader:
                 c = c.to(self.device)
                 emb, __ = model(c)
-                feats.append(emb)
+                motif_feats.append(emb)
             
             with torch.no_grad():               
-                feats = torch.cat(feats)
+                motif_feats = torch.cat(motif_feats)
 
-            from models.ginet_finetune_mp import GINet
+            label_feats = []
+            labels = []
+            for d in train_loader:
+                d = d.to(self.device)
+                emb, __ = model(d)
+                label_feats.append(emb)
+                labels.append(d.y)
+
+            with torch.no_grad():
+                label_feats = torch.cat(label_feats)
+                labels = torch.cat(labels)
+
+                linit1 = torch.mean(label_feats[torch.nonzero(labels == 0)[:, 0]], dim=0)
+                linit2 = torch.mean(label_feats[torch.nonzero(labels == 1)[:, 0]], dim=0)
+
+                label_feats = torch.vstack((linit1, linit2)).to(self.device)
+
+            from models.ginet_finetune_mp_link import GINet
             model = GINet(num_motifs, self.config['dataset']['task'], **self.config["model"]).to(self.device)
             model = self._load_pre_trained_weights(model)
-            #model.init_motif_emb(feats)
+            #model.init_motif_emb(motif_feats)
         elif self.config['model_type'] == 'gcn':
             from models.gcn_finetune import GCN
             model = GCN(self.config['dataset']['task'], **self.config["model"]).to(self.device)
@@ -181,18 +197,26 @@ class FineTune(object):
         params = list(map(lambda x: x[1],list(filter(lambda kv: kv[0] in layer_list, model.named_parameters()))))
         base_params = list(map(lambda x: x[1],list(filter(lambda kv: kv[0] not in layer_list, model.named_parameters()))))
 
-        def initializer(emb):
-            emb[:] = feats
+        def motif_initializer(emb):
+            emb[:] = motif_feats
             return emb
-        motif_embed = dgl.nn.NodeEmbedding(feats.shape[0], feats.shape[1], name="motif_embed",
-                                           init_func=initializer)
+        motif_embed = dgl.nn.NodeEmbedding(motif_feats.shape[0], motif_feats.shape[1], name="motif_embed",
+                                           init_func=motif_initializer)
         print("motif embedding is in ", motif_embed.emb_tensor.device)
+
+        def label_initializer(emb):
+            emb[:] = label_feats
+            return emb
+        label_embed = dgl.nn.NodeEmbedding(label_feats.shape[0], label_feats.shape[1], name="label_embed",
+                                           init_func=label_initializer)
+        print("label embedding is in ", label_embed.emb_tensor.device)
 
         optimizer = torch.optim.Adam(
             [{'params': base_params, 'lr': self.config['init_base_lr']}, {'params': params}],
             self.config['init_lr'], weight_decay=eval(self.config['weight_decay'])
         )
-        emb_optimizer = dgl.optim.SparseAdam(params=[motif_embed], lr=self.config['init_base_lr'] * 10)
+        #motif_optimizer = dgl.optim.SparseAdam(params=[motif_embed], lr=self.config['init_base_lr'] * 10)
+        label_optimizer = dgl.optim.SparseAdam(params=[label_embed], lr=self.config['init_base_lr'] * 10)
 
         if apex_support and self.config['fp16_precision']:
             model, optimizer = amp.initialize(
@@ -212,9 +236,6 @@ class FineTune(object):
 
         for epoch_counter in range(self.config['epochs']):
             for bn, data in enumerate(train_loader):
-                #optimizer.zero_grad()
-                #emb_optimizer.zero_grad()
-
                 data = data.to(self.device)
              
                 mol_idx = []
@@ -229,10 +250,15 @@ class FineTune(object):
                 
                 motif_samples = motif_embed(clique_idx).to(self.device)
 
-                optimizer.zero_grad()
-                emb_optimizer.zero_grad()
+                label_samples = label_embed(torch.zeros(data.num_graphs, dtype=torch.long)).unsqueeze(0)
+                label_samples = torch.cat((label_samples, label_embed(torch.ones(data.num_graphs,\
+                        dtype=torch.long)).unsqueeze(0)), dim=0).to(self.device)
 
-                loss = self._step(model, data, n_iter,  mol_idx, motif_samples)
+                optimizer.zero_grad()
+                #motif_optimizer.zero_grad()
+                label_optimizer.zero_grad()
+
+                loss = self._step(model, data, n_iter,  mol_idx, motif_samples, label_samples)
 
                 if n_iter % self.config['log_every_n_steps'] == 0:
                     self.writer.add_scalar('train_loss', loss, global_step=n_iter)
@@ -245,21 +271,22 @@ class FineTune(object):
                     loss.backward()
 
                 optimizer.step()
-                emb_optimizer.step()
+                #motif_optimizer.step()
+                label_optimizer.step()
                 n_iter += 1
 
             # validate the model if requested
             if epoch_counter % self.config['eval_every_n_epochs'] == 0:
                 if self.config['dataset']['task'] == 'classification': 
                     valid_loss, valid_cls = self._validate(model, valid_loader, motif_embed.emb_tensor,
-                                                           clique_list, mol_to_clique)
+                                                           label_embed.emb_tensor, clique_list, mol_to_clique)
                     if valid_cls > best_valid_cls:
                         # save the model weights
                         best_valid_cls = valid_cls
                         torch.save(model.state_dict(), os.path.join(model_checkpoints_folder, 'model.pth'))
                 elif self.config['dataset']['task'] == 'regression': 
                     valid_loss, valid_rgr = self._validate(model, valid_loader, motif_embed.emb_tensor,
-                                                           clique_list, mol_to_clique)
+                                                           label_embed.emb_tensor, clique_list, mol_to_clique)
                     if valid_rgr < best_valid_rgr:
                         # save the model weights
                         best_valid_rgr = valid_rgr
@@ -268,7 +295,7 @@ class FineTune(object):
                 self.writer.add_scalar('validation_loss', valid_loss, global_step=valid_n_iter)
                 valid_n_iter += 1
         
-        self._test(model, test_loader, motif_embed.emb_tensor, clique_list, mol_to_clique)
+        self._test(model, test_loader, motif_embed.emb_tensor, label_embed.emb_tensor, clique_list, mol_to_clique)
 
     def _load_pre_trained_weights(self, model):
         try:
@@ -282,7 +309,7 @@ class FineTune(object):
 
         return model
 
-    def _validate(self, model, valid_loader, motif_emb_tensor, clique_list, mol_to_clique):
+    def _validate(self, model, valid_loader, motif_emb_tensor, label_emb_tensor, clique_list, mol_to_clique):
         predictions = []
         labels = []
         with torch.no_grad():
@@ -305,8 +332,13 @@ class FineTune(object):
 
                 motif_samples = motif_emb_tensor.index_select(0, clique_idx).to(self.device)
 
-                __, pred = model(data, mol_idx, motif_samples)
-                loss = self._step(model, data, bn, mol_idx, motif_samples)
+                label_samples = label_emb_tensor.index_select(0, torch.zeros(data.num_graphs, dtype=torch.long))\
+                        .unsqueeze(0)
+                label_samples = torch.cat((label_samples, label_emb_tensor.index_select(0, torch.ones(data.num_graphs,\
+                        dtype=torch.long)).unsqueeze(0)), dim=0).to(self.device)
+
+                __, pred = model(data, mol_idx, motif_samples, label_samples)
+                loss = self._step(model, data, bn, mol_idx, motif_samples, label_samples)
 
                 valid_loss += loss.item() * data.y.size(0)
                 num_data += data.y.size(0)
@@ -344,7 +376,7 @@ class FineTune(object):
             print('Validation loss:', valid_loss, 'ROC AUC:', roc_auc)
             return valid_loss, roc_auc
 
-    def _test(self, model, test_loader, motif_emb_tensor, clique_list, mol_to_clique):
+    def _test(self, model, test_loader, motif_emb_tensor, label_emb_tensor, clique_list, mol_to_clique):
         model_path = os.path.join(self.writer.log_dir, 'checkpoints', 'model.pth')
         state_dict = torch.load(model_path, map_location=self.device)
         model.load_state_dict(state_dict)
@@ -373,8 +405,13 @@ class FineTune(object):
 
                 motif_samples = motif_emb_tensor.index_select(0, clique_idx).to(self.device)
 
-                __, pred = model(data, mol_idx, motif_samples)
-                loss = self._step(model, data, bn, mol_idx, motif_samples)
+                label_samples = label_emb_tensor.index_select(0, torch.zeros(data.num_graphs, dtype=torch.long))\
+                        .unsqueeze(0)
+                label_samples = torch.cat((label_samples, label_emb_tensor.index_select(0, torch.ones(data.num_graphs,\
+                        dtype=torch.long)).unsqueeze(0)), dim=0).to(self.device)
+
+                __, pred = model(data, mol_idx, motif_samples, label_samples)
+                loss = self._step(model, data, bn, mol_idx, motif_samples, label_samples)
 
                 test_loss += loss.item() * data.y.size(0)
                 num_data += data.y.size(0)
