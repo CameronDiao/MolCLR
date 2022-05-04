@@ -70,15 +70,11 @@ class GINet(nn.Module):
         self.drop_ratio = drop_ratio
         self.task = task
 
-        self.diff_measure = torch.nn.CosineSimilarity(dim=-1)
-
         self.x_embedding1 = nn.Embedding(num_atom_type, emb_dim)
         self.x_embedding2 = nn.Embedding(num_chirality_tag, emb_dim)
         nn.init.xavier_uniform_(self.x_embedding1.weight.data)
         nn.init.xavier_uniform_(self.x_embedding2.weight.data)
         
-        self.label_embedding = nn.Embedding(2, feat_dim)
-
         # List of MLPs
         self.gnns = nn.ModuleList()
         for layer in range(num_layer):
@@ -98,8 +94,8 @@ class GINet(nn.Module):
 
         self.feat_lin = nn.Linear(self.emb_dim, self.feat_dim)
         out_dim = 1
-        out_dim = 2 if self.task == 'classification' else 1
-      
+        #out_dim = 2 if self.task == 'classification' else 1
+     
         self.out_lin = nn.Sequential(
             nn.Linear(self.feat_dim, self.feat_dim), 
             nn.ReLU(inplace=True),
@@ -107,15 +103,6 @@ class GINet(nn.Module):
         )
 
         #self.softmax = nn.Softmax(dim=-1)
-
-        self.label_lin = nn.Sequential(
-            nn.Linear(self.feat_dim, self.feat_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(self.feat_dim, self.feat_dim//2)
-        )
-        
-        #self.label_lin = nn.Linear(self.feat_dim, self.feat_dim)
-        #nn.init.xavier_uniform_(self.label_lin.weight.data)
 
         self.pred_n_layer = max(1, pred_n_layer)
 
@@ -131,7 +118,7 @@ class GINet(nn.Module):
                 ])
         elif pred_act == 'softplus':
             pred_head = [
-                nn.Linear(self.feat_dim, self.feat_dim//2), 
+                nn.Linear(int(1.5 * self.feat_dim), self.feat_dim//2), 
                 nn.Softplus()
             ]
             for _ in range(self.pred_n_layer - 1):
@@ -145,11 +132,13 @@ class GINet(nn.Module):
         pred_head.append(nn.Linear(self.feat_dim//2, out_dim))
         self.pred_head = nn.Sequential(*pred_head)
 
-    def init_label_emb(self, init):
-        with torch.no_grad():
-            self.label_embedding.weight.copy_(init)
+        #self.prompt = nn.Linear(self.feat_dim, out_dim)
 
-    def forward(self, data, device):
+    #def init_label_emb(self, init):
+    #    with torch.no_grad():
+    #        self.prompt.weight.copy_(init)
+
+    def forward(self, data, label_samples):
         x = data.x
         edge_index = data.edge_index
         edge_attr = data.edge_attr
@@ -166,14 +155,11 @@ class GINet(nn.Module):
 
         h = self.pool(h, data.batch)
         h = self.feat_lin(h)
-        h = self.out_lin(h)
 
-        h1 = torch.squeeze(self.label_embedding(torch.zeros(h.shape[0], dtype=torch.long).to(device)))
-        h1 = self.label_lin(h1)
-        #h1 = self.out_lin(h1)
-        h2 = torch.squeeze(self.label_embedding(torch.ones(h.shape[0], dtype=torch.long).to(device)))
-        h2 = self.label_lin(h2)
-        #h2 = self.out_lin(h2)
+        h1 = torch.squeeze(label_samples[0])
+        h1 = self.out_lin(h1)
+        h2 = torch.squeeze(label_samples[1])
+        h2 = self.out_lin(h2)
 
         #h = F.normalize(h, dim=1)
         #h1 = F.normalize(h1, dim=1)
