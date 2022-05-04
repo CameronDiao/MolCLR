@@ -96,8 +96,7 @@ class FineTune(object):
 
         return device
 
-    def _step(self, model, data, n_iter, mol_idx, motif_samples, label_samples):
-        
+    def _step(self, model, data, n_iter, mol_idx, motif_samples, label_samples):   
         # get the prediction
         __, pred = model(data, mol_idx, motif_samples, label_samples)
         if self.config['dataset']['task'] == 'classification':
@@ -163,6 +162,9 @@ class FineTune(object):
             with torch.no_grad():               
                 motif_feats = torch.cat(motif_feats)
 
+            clique_list.append("EMP0")
+            clique_list.append("EMP1")
+
             label_feats = []
             labels = []
             for d in train_loader:
@@ -215,7 +217,7 @@ class FineTune(object):
             [{'params': base_params, 'lr': self.config['init_base_lr']}, {'params': params}],
             self.config['init_lr'], weight_decay=eval(self.config['weight_decay'])
         )
-        #motif_optimizer = dgl.optim.SparseAdam(params=[motif_embed], lr=self.config['init_base_lr'] * 10)
+        motif_optimizer = dgl.optim.SparseAdam(params=[motif_embed], lr=self.config['init_base_lr'] * 10)
         label_optimizer = dgl.optim.SparseAdam(params=[label_embed], lr=self.config['init_base_lr'] * 10)
 
         if apex_support and self.config['fp16_precision']:
@@ -250,12 +252,15 @@ class FineTune(object):
                 
                 motif_samples = motif_embed(clique_idx).to(self.device)
 
-                label_samples = label_embed(torch.zeros(data.num_graphs, dtype=torch.long)).unsqueeze(0)
-                label_samples = torch.cat((label_samples, label_embed(torch.ones(data.num_graphs,\
-                        dtype=torch.long)).unsqueeze(0)), dim=0).to(self.device)
+                lab0 = label_embed(torch.zeros(data.num_graphs, dtype=torch.long)).unsqueeze(0)
+                lab1 = label_embed(torch.ones(data.num_graphs, dtype=torch.long)).unsqueeze(0)
+                label_samples = torch.cat((lab0, lab1), dim=0).to(self.device)
+                #label_samples = label_embed(torch.zeros(data.num_graphs, dtype=torch.long)).unsqueeze(0)
+                #label_samples = torch.cat((label_samples, label_embed(torch.ones(data.num_graphs,\
+                #        dtype=torch.long)).unsqueeze(0)), dim=0).to(self.device)
 
                 optimizer.zero_grad()
-                #motif_optimizer.zero_grad()
+                motif_optimizer.zero_grad()
                 label_optimizer.zero_grad()
 
                 loss = self._step(model, data, n_iter,  mol_idx, motif_samples, label_samples)
@@ -271,7 +276,7 @@ class FineTune(object):
                     loss.backward()
 
                 optimizer.step()
-                #motif_optimizer.step()
+                motif_optimizer.step()
                 label_optimizer.step()
                 n_iter += 1
 
@@ -332,10 +337,15 @@ class FineTune(object):
 
                 motif_samples = motif_emb_tensor.index_select(0, clique_idx).to(self.device)
 
-                label_samples = label_emb_tensor.index_select(0, torch.zeros(data.num_graphs, dtype=torch.long))\
+                lab0 = label_emb_tensor.index_select(0, torch.zeros(data.num_graphs, dtype=torch.long))\
                         .unsqueeze(0)
-                label_samples = torch.cat((label_samples, label_emb_tensor.index_select(0, torch.ones(data.num_graphs,\
-                        dtype=torch.long)).unsqueeze(0)), dim=0).to(self.device)
+                lab1 = label_emb_tensor.index_select(0, torch.ones(data.num_graphs, dtype=torch.long))\
+                        .unsqueeze(0)
+                label_samples = torch.cat((lab0, lab1), dim=0).to(self.device)
+                #label_samples = label_emb_tensor.index_select(0, torch.zeros(data.num_graphs, dtype=torch.long))\
+                #        .unsqueeze(0)
+                #label_samples = torch.cat((label_samples, label_emb_tensor.index_select(0, torch.ones(data.num_graphs,\
+                #        dtype=torch.long)).unsqueeze(0)), dim=0).to(self.device)
 
                 __, pred = model(data, mol_idx, motif_samples, label_samples)
                 loss = self._step(model, data, bn, mol_idx, motif_samples, label_samples)
@@ -405,10 +415,15 @@ class FineTune(object):
 
                 motif_samples = motif_emb_tensor.index_select(0, clique_idx).to(self.device)
 
-                label_samples = label_emb_tensor.index_select(0, torch.zeros(data.num_graphs, dtype=torch.long))\
+                lab0 = label_emb_tensor.index_select(0, torch.zeros(data.num_graphs, dtype=torch.long))\
                         .unsqueeze(0)
-                label_samples = torch.cat((label_samples, label_emb_tensor.index_select(0, torch.ones(data.num_graphs,\
-                        dtype=torch.long)).unsqueeze(0)), dim=0).to(self.device)
+                lab1 = label_emb_tensor.index_select(0, torch.ones(data.num_graphs, dtype=torch.long))\
+                        .unsqueeze(0)
+                label_samples = torch.cat((lab0, lab1), dim=0).to(self.device)
+                #label_samples = label_emb_tensor.index_select(0, torch.zeros(data.num_graphs, dtype=torch.long))\
+                #        .unsqueeze(0)
+                #label_samples = torch.cat((label_samples, label_emb_tensor.index_select(0, torch.ones(data.num_graphs,\
+                #        dtype=torch.long)).unsqueeze(0)), dim=0).to(self.device)
 
                 __, pred = model(data, mol_idx, motif_samples, label_samples)
                 loss = self._step(model, data, bn, mol_idx, motif_samples, label_samples)

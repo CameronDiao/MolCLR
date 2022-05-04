@@ -353,7 +353,7 @@ class GINet(nn.Module):
         elif self.task == 'regression':
             out_dim = 1
        
-        #self.motif_norm = LayerNorm(self.feat_dim)
+        self.motif_norm = LayerNorm(self.feat_dim)
 
         #self.motif_pool = GlobalAttention(gate_nn=nn.Sequential(nn.Linear(self.feat_dim, 1)),
         #                                  nn=nn.Sequential(nn.Linear(self.feat_dim, self.feat_dim//2)))
@@ -361,7 +361,6 @@ class GINet(nn.Module):
         #self.motif_pool = GraphMultisetTransformer(in_channels=self.feat_dim, hidden_channels=self.feat_dim,
         #                                           out_channels=self.feat_dim, pool_sequences=["GMPool_I"])
         
-        #self.motif_trans = SAB(in_channels=self.feat_dim, out_channels=self.feat_dim, num_heads=4)
         self.motif_pool = PMA(channels=self.feat_dim, num_heads=4, num_seeds=1)
 
         self.out_lin = nn.Sequential(
@@ -384,7 +383,7 @@ class GINet(nn.Module):
                 ])
         elif pred_act == 'softplus':
             pred_head = [
-                nn.Linear(int(1.5 * self.feat_dim), self.feat_dim//2), 
+                nn.Linear(int(2.5 * self.feat_dim), self.feat_dim//2), 
                 nn.Softplus()
             ]
             for _ in range(self.pred_n_layer - 1):
@@ -422,8 +421,8 @@ class GINet(nn.Module):
         hp = torch.cat((motif_samples, h), dim=0)
         batch, mask = to_dense_batch(hp, mol_idx)
         mask = (~mask).unsqueeze(1).to(dtype=hp.dtype) * -1e9
-        batch = self.motif_pool(batch, None, mask)
-        #batch = self.motif_pool(self.motif_norm(batch), None, mask)
+        #batch = self.motif_pool(batch, None, mask)
+        batch = self.motif_pool(self.motif_norm(batch), None, mask)
         hp = batch.squeeze(1)
         
         #hp = torch.cat((h, hp), dim=1)
@@ -434,8 +433,8 @@ class GINet(nn.Module):
         h1 = label_samples[1]
         h1 = self.out_lin(h1)
 
-        h0 = torch.cat((h, h0), dim=1)
-        h1 = torch.cat((h, h1), dim=1)
+        h0 = torch.cat((h, hp, h0), dim=1)
+        h1 = torch.cat((h, hp, h1), dim=1)
 
         hp = torch.cat((self.pred_head(h0), self.pred_head(h1)), dim=1)
 
