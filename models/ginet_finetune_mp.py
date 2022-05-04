@@ -375,7 +375,7 @@ class GINet(nn.Module):
         #                   nn.Linear(self.feat_dim, self.feat_dim//2)
         #               )
 
-        self.prompt = nn.Linear(self.feat_dim//2, out_dim)
+        self.prompt = nn.Linear(self.feat_dim, out_dim)
 
         #self.pred_n_layer = max(1, pred_n_layer)
 
