@@ -5,9 +5,11 @@ import torch
 from torch import nn
 from torch import Tensor
 from torch.nn import LayerNorm, Linear
+from torch.nn.utils import weight_norm
 
 import torch.nn.functional as F
 
+from torch_geometric.data.batch import Batch
 from torch_geometric.nn import GCNConv
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import to_dense_batch
@@ -267,6 +269,17 @@ class GraphMultisetTransformer(torch.nn.Module):
         return (f'{self.__class__.__name__}({self.in_channels}, '
                 f'{self.out_channels}, pool_sequences={self.pool_sequences})')
 
+class ScaleNorm(nn.Module):
+    """ScaleNorm"""
+    def __init__(self, scale, eps=1e-5):
+        super(ScaleNorm, self).__init__()
+        self.scale = nn.Parameter(torch.tensor(scale))
+        self.eps = eps
+
+    def forward(self, x):
+        norm = self.scale / torch.norm(x, dim=-1, keepdim=True).clamp(min=self.eps)
+        return x * norm
+
 class GINEConv(MessagePassing):
     def __init__(self, emb_dim):
         super(GINEConv, self).__init__()
@@ -318,7 +331,6 @@ class GINet(nn.Module):
         drop_ratio=0, pool='mean', pred_n_layer=2, pred_act='softplus'
     ):
         super(GINet, self).__init__()
-        self.num_motifs = num_motifs
         self.num_layer = num_layer
         self.emb_dim = emb_dim
         self.feat_dim = feat_dim
@@ -348,32 +360,45 @@ class GINet(nn.Module):
             self.pool = global_add_pool
 
         self.feat_lin = nn.Linear(self.emb_dim, self.feat_dim)
-        if self.task == 'classification':
-            out_dim = 2
-        elif self.task == 'regression':
-            out_dim = 1
-       
-        self.motif_norm = LayerNorm(self.feat_dim)
-
-        #self.motif_pool = GlobalAttention(gate_nn=nn.Sequential(nn.Linear(self.feat_dim, 1)),
-        #                                  nn=nn.Sequential(nn.Linear(self.feat_dim, self.feat_dim//2)))
-
-        #self.motif_pool = GraphMultisetTransformer(in_channels=self.feat_dim, hidden_channels=self.feat_dim,
-        #                                           out_channels=self.feat_dim, pool_sequences=["GMPool_I"])
         
-        self.motif_pool = PMA(channels=self.feat_dim, num_heads=4, num_seeds=1)
-
         self.out_lin = nn.Sequential(
                            nn.Linear(self.feat_dim, self.feat_dim),
                            nn.ReLU(inplace=True),
                            nn.Linear(self.feat_dim, self.feat_dim//2)
-                       )
+                       )        
+
+        if self.task == 'classification':
+            out_dim = 2
+        elif self.task == 'regression':
+            out_dim = 1
+      
+        self.motif_embedding = nn.Embedding(num_motifs, self.feat_dim//2)
+        nn.init.xavier_uniform_(self.motif_embedding.weight.data)
+
+        #self.motif_norm = LayerNorm(self.feat_dim//2)
+
+        #self.motif_pool = GlobalAttention(gate_nn=nn.Sequential(nn.Linear(self.feat_dim, 1)),
+        #                                  nn=nn.Sequential(nn.Linear(self.feat_dim, self.feat_dim//2)))
+
+        #self.motif_pool = GraphMultisetTransformer(in_channels=self.feat_dim//2, hidden_channels=self.feat_dim,
+        #                                           out_channels=self.feat_dim//2, pool_sequences=["SelfAtt", "GMPool_I"])
+        
+        #self.motif_pool = PMA(channels=self.feat_dim//2, num_heads=4, num_seeds=1)
+        
+        self.motif_pool = MAB(self.feat_dim//2, self.feat_dim//2, self.feat_dim//2, num_heads=4)
+
+        self.pred_head = nn.Sequential(
+                            nn.Linear(self.feat_dim, self.feat_dim//2),
+                            nn.Softplus(),
+                            nn.Linear(self.feat_dim//2, self.feat_dim//2),
+                            nn.Softplus()
+                         )
 
         self.pred_n_layer = max(1, pred_n_layer)
 
         if pred_act == 'relu':
             pred_head = [
-                nn.Linear(2 * self.feat_dim, self.feat_dim//2), 
+                nn.Linear(self.feat_dim, self.feat_dim//2), 
                 nn.ReLU(inplace=True)
             ]
             for _ in range(self.pred_n_layer - 1):
@@ -383,7 +408,7 @@ class GINet(nn.Module):
                 ])
         elif pred_act == 'softplus':
             pred_head = [
-                nn.Linear(int(2.5 * self.feat_dim), self.feat_dim//2), 
+                nn.Linear(self.feat_dim, self.feat_dim//2), 
                 nn.Softplus()
             ]
             for _ in range(self.pred_n_layer - 1):
@@ -393,15 +418,27 @@ class GINet(nn.Module):
                 ])
         else:
             raise ValueError('Undefined activation function')
-        
-        pred_head.append(nn.Linear(self.feat_dim//2, out_dim))
+ 
+        #pred_head.append(nn.Linear(self.feat_dim//2, out_dim))
         self.pred_head = nn.Sequential(*pred_head)
 
-    #def init_motif_emb(self, init):
-    #    with torch.no_grad():
-    #        self.motif_embedding.weight.data = nn.Parameter(init)
-    
-    def forward(self, data, mol_idx, motif_samples, label_samples):
+        #self.prompt = nn.Linear(self.feat_dim//2, out_dim, bias=False)
+        self.prompt = nn.Parameter(torch.Tensor(out_dim, self.feat_dim//2))
+
+    def init_label_emb(self, init):
+        with torch.no_grad():
+            self.prompt.data.copy_(init)
+
+    def get_label_emb(self):
+        for name, param in self.named_parameters():
+            if "prompt" in name:
+                return param
+
+    def init_motif_emb(self, init):
+        with torch.no_grad():
+            self.motif_embedding.weight.data.copy_(init)
+
+    def forward(self, data, mol_idx, clique_idx):
         x = data.x
         edge_index = data.edge_index
         edge_attr = data.edge_attr
@@ -417,28 +454,22 @@ class GINet(nn.Module):
 
         h = self.pool(h, data.batch)
         h = self.feat_lin(h)
-
-        hp = torch.cat((motif_samples, h), dim=0)
+        h = self.out_lin(h)
+        
+        hp = self.motif_embedding(clique_idx)
         batch, mask = to_dense_batch(hp, mol_idx)
         mask = (~mask).unsqueeze(1).to(dtype=hp.dtype) * -1e9
+        #batch = self.motif_norm(batch)
+        batch = self.motif_pool(h.unsqueeze(1), batch, None, mask)
         #batch = self.motif_pool(batch, None, mask)
-        batch = self.motif_pool(self.motif_norm(batch), None, mask)
         hp = batch.squeeze(1)
-        
-        #hp = torch.cat((h, hp), dim=1)
-        #return h, self.pred_head(hp)
-
-        h0 = label_samples[0]
-        h0 = self.out_lin(h0)
-        h1 = label_samples[1]
-        h1 = self.out_lin(h1)
-
-        h0 = torch.cat((h, hp, h0), dim=1)
-        h1 = torch.cat((h, hp, h1), dim=1)
-
-        hp = torch.cat((self.pred_head(h0), self.pred_head(h1)), dim=1)
-
-        return h, hp
+      
+        hp = torch.cat((F.normalize(h, dim=1), F.normalize(hp, dim=1)), dim=1)
+        #hp = torch.cat((ho, hp), dim=1)
+        hp = self.pred_head(hp)
+        pw = F.normalize(self.prompt, dim=1)
+        hp = F.linear(hp, pw)
+        return h, hp 
 
     def load_my_state_dict(self, state_dict):
         own_state = self.state_dict()

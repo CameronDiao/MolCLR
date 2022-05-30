@@ -314,11 +314,10 @@ class GINet(nn.Module):
         node representations
     """
     def __init__(self, 
-        num_motifs, task='classification', num_layer=5, emb_dim=300, feat_dim=512, 
+        task='classification', num_layer=5, emb_dim=300, feat_dim=512, 
         drop_ratio=0, pool='mean', pred_n_layer=2, pred_act='softplus'
     ):
         super(GINet, self).__init__()
-        self.num_motifs = num_motifs
         self.num_layer = num_layer
         self.emb_dim = emb_dim
         self.feat_dim = feat_dim
