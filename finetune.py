@@ -79,11 +79,47 @@ def _gen_clique_to_mol(clique_list, mol_to_clique):
             clique_to_mol[clique_list.index(clique)].append(mol)
     return clique_to_mol
 
+def _get_training_molecules(train_loader):
+    train_mol = []
+    for data in train_loader:
+        for d in data.to_data_list():
+            train_mol.append(d.mol_index.item())
+    return train_mol
+
 def _ortho_constraint(device, prompt):
     return torch.norm(torch.mm(prompt, prompt.T) - torch.eye(prompt.shape[0]).to(device))
 
+#def _ortho_constraint(device, prompt):
+#    p = prompt.detach().clone()
+#    cols = prompt.shape[1]
+#    rows = prompt.shape[0]
+#    w1 = p.view(-1, cols)
+#    wt = torch.transpose(w1, 0, 1)
+#    m = torch.matmul(wt, w1)
+#    identity = torch.eye(cols, device=device)
+#
+#    w_tmp = (m - identity)
+#    height = w_tmp.size(0)
+#    u = F.normalize(w_tmp.new_empty(height).normal_(0,1), dim=0, eps=1e-12)
+#    v = F.normalize(torch.matmul(w_tmp.T, u), dim=0, eps=1e-12)
+#    u = F.normalize(torch.matmul(w_tmp, v), dim=0, eps=1e-12)
+#    sigma = torch.dot(u, torch.matmul(w_tmp, v))
+#
+#    return (torch.norm(sigma, 2))**2
+
 def _ortho_learning_rate(init_lr, epoch):
     return 0.1 * init_lr
+    #if epoch < 10:
+    #    return 0.1 * init_lr
+    #elif epoch < 25:
+    #    return 0.001 * init_lr
+    #elif epoch < 50:
+    #    return 0.0001 * init_lr
+    #elif epoch < 75:
+    #    return 0.000001 * init_lr
+    #else:
+    #    return 0
+
 
 class Normalizer(object):
     """Normalize a Tensor and restore it later. """
@@ -167,6 +203,32 @@ class FineTune(object):
                     mol_to_clique[i][cs] += 1
         return list(clique_set), mol_to_clique
 
+    def _filter_cliques(self, threshold, train_loader, clique_list, mol_to_clique, clique_to_mol):
+        train_mol = _get_training_molecules(train_loader)
+        
+        fil_clique_list = []
+        for i, d in enumerate(clique_list):
+            if sum(mol in train_mol for mol in clique_to_mol[i]) <= threshold:
+                fil_clique_list.append(d)
+        
+        tmol_to_clique = deepcopy(mol_to_clique)
+        for mol in mol_to_clique:
+            for clique in mol_to_clique[mol].keys():
+                if clique in fil_clique_list:
+                    del tmol_to_clique[mol][clique]
+        
+        mol_to_clique = deepcopy(tmol_to_clique)
+        emp_mol = []
+        for mol in tmol_to_clique:
+            #if all(clique in fil_clique_list for clique in mol_to_clique[mol]):
+            if len(tmol_to_clique[mol]) == 0:
+                mol_to_clique[mol]['EMP0'] = 1
+                mol_to_clique[mol]['EMP1'] = 1
+                emp_mol.append(mol)
+
+        clique_list = list(set(clique_list) - set(fil_clique_list))
+        return emp_mol, clique_list, mol_to_clique
+
     def _extract_train_cliques(self, batch, mol_to_clique, clique_list):
         mol_idx = []
         clique_idx = []
@@ -203,7 +265,9 @@ class FineTune(object):
         smiles_data, train_loader, valid_loader, test_loader = self.dataset.get_data_loaders()
 
         clique_list, mol_to_clique = self._gen_cliques(smiles_data)
-        num_motifs = len(clique_list)
+        clique_to_mol = _gen_clique_to_mol(clique_list, mol_to_clique)
+        emp_mol, clique_list, mol_to_clique = self._filter_cliques(10, train_loader, clique_list, mol_to_clique, clique_to_mol)
+        num_motifs = len(clique_list) + 2
         print("Finished generating motif vocabulary")
 
         clique_dataset = MolCliqueDatasetWrapper(clique_list, self.config['batch_size'], self.config['dataset']['num_workers'])
@@ -234,6 +298,9 @@ class FineTune(object):
             with torch.no_grad():               
                 motif_feats = torch.cat(motif_feats)
 
+            clique_list.append("EMP0")
+            clique_list.append("EMP1")
+
             label_feats = []
             labels = []
             for d in train_loader:
@@ -251,10 +318,12 @@ class FineTune(object):
 
                 label_feats = torch.vstack((linit0, linit1)).to(self.device)
 
+                motif_feats = torch.cat((motif_feats, label_feats), dim=0)
+
             from models.ginet_finetune_mp_link import GINet
             model = GINet(num_motifs, self.config['dataset']['task'], **self.config["model"]).to(self.device)
             model = self._load_pre_trained_weights(model)
-            model.init_motif_emb(motif_feats)
+            model.init_clique_emb(motif_feats)
             model.init_label_emb(label_feats)
         elif self.config['model_type'] == 'gcn':
             from models.gcn_finetune import GCN
@@ -263,7 +332,7 @@ class FineTune(object):
 
         layer_list = []
         for name, param in model.named_parameters():
-            if 'motif' in name or 'pred' in name or 'prompt' in name:
+            if 'motif' in name or 'conc' in name or 'pred' in name or 'prompt' in name:
                 layer_list.append(name)
 
         params = list(map(lambda x: x[1],list(filter(lambda kv: kv[0] in layer_list, model.named_parameters()))))
@@ -277,8 +346,8 @@ class FineTune(object):
         #print("motif embedding is in ", motif_embed.emb_tensor.device)
 
         optimizer = torch.optim.Adam(
-            [{'params': base_params, 'lr': self.config['init_base_lr']}, {'params': params}],
-            self.config['init_lr'], weight_decay=eval(self.config['weight_decay'])
+                [{'params': base_params, 'lr': self.config['init_base_lr']}, {'params': params}],
+                self.config['init_lr'], weight_decay=eval(self.config['weight_decay'])
         )
         #motif_optimizer = dgl.optim.SparseAdam(params=[motif_embed], lr=self.config['init_lr'])
 
@@ -319,11 +388,13 @@ class FineTune(object):
                 else:
                     loss.backward()
 
+                #nn.utils.clip_grad_norm_(model.parameters(), 128)
                 optimizer.step()
                 #motif_optimizer.step()
                 
                 n_iter += 1
 
+            #_plot_grad_flow(model.named_parameters(), epoch_counter)
             # validate the model if requested
             if epoch_counter % self.config['eval_every_n_epochs'] == 0:
                 if self.config['dataset']['task'] == 'classification': 

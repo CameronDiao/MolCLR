@@ -84,6 +84,7 @@ class MolCliqueDataset(Dataset):
         edge_index = torch.tensor([row, col], dtype=torch.long)
         edge_attr = torch.tensor(np.array(edge_feat), dtype=torch.long)
         data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+        data.mol_index = index
         return data
 
     def __len__(self):
