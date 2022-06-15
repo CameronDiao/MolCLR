@@ -109,17 +109,6 @@ def _ortho_constraint(device, prompt):
 
 def _ortho_learning_rate(init_lr, epoch):
     return 0.1 * init_lr
-    #if epoch < 10:
-    #    return 0.1 * init_lr
-    #elif epoch < 25:
-    #    return 0.001 * init_lr
-    #elif epoch < 50:
-    #    return 0.0001 * init_lr
-    #elif epoch < 75:
-    #    return 0.000001 * init_lr
-    #else:
-    #    return 0
-
 
 class Normalizer(object):
     """Normalize a Tensor and restore it later. """
@@ -192,7 +181,7 @@ class FineTune(object):
         for i, m in enumerate(smiles_data):
             mol_to_clique[i] = {}
             mol = get_mol(m)
-            cliques, __  = brics_decomp(mol)
+            cliques, edges  = brics_decomp(mol)
             for c in cliques:
                 cmol = get_clique_mol(mol, c)
                 cs = get_smiles(cmol)
@@ -220,10 +209,10 @@ class FineTune(object):
         mol_to_clique = deepcopy(tmol_to_clique)
         emp_mol = []
         for mol in tmol_to_clique:
+            mol_to_clique[mol]['EMP0'] = 1
+            mol_to_clique[mol]['EMP1'] = 1
             #if all(clique in fil_clique_list for clique in mol_to_clique[mol]):
             if len(tmol_to_clique[mol]) == 0:
-                mol_to_clique[mol]['EMP0'] = 1
-                mol_to_clique[mol]['EMP1'] = 1
                 emp_mol.append(mol)
 
         clique_list = list(set(clique_list) - set(fil_clique_list))
@@ -263,11 +252,13 @@ class FineTune(object):
 
     def train(self):
         smiles_data, train_loader, valid_loader, test_loader = self.dataset.get_data_loaders()
+        #full_data_loader = self.dataset.get_full_data_loader()
 
         clique_list, mol_to_clique = self._gen_cliques(smiles_data)
         clique_to_mol = _gen_clique_to_mol(clique_list, mol_to_clique)
         emp_mol, clique_list, mol_to_clique = self._filter_cliques(10, train_loader, clique_list, mol_to_clique, clique_to_mol)
         num_motifs = len(clique_list) + 2
+        #num_motifs = len(clique_list)
         print("Finished generating motif vocabulary")
 
         clique_dataset = MolCliqueDatasetWrapper(clique_list, self.config['batch_size'], self.config['dataset']['num_workers'])
@@ -289,6 +280,21 @@ class FineTune(object):
             #model = GINet(self.config['dataset']['task'], **self.config["model"]).to(self.device)
             model = self._load_pre_trained_weights(model)
             
+            #mol_to_feats = {}
+            #for data in full_data_loader:
+            #    data = data.to(self.device)
+            #    __, emb= model(data)
+            #    for i,d in enumerate(data.to_data_list()):
+            #        mol_to_feats[d.mol_index.item()] = emb[i, :]
+
+            #motif_feats = []
+            #with torch.no_grad():
+            #    for i in range(len(clique_list)):
+            #        mfeats = [mol_to_feats[mol] for mol in clique_to_mol[i]]
+            #        motif_feats.append(torch.mean(torch.stack(mfeats), dim=0))
+                    
+            #    motif_feats = torch.stack(motif_feats)
+
             motif_feats = []
             for c in clique_loader:
                 c = c.to(self.device)
@@ -302,11 +308,13 @@ class FineTune(object):
             clique_list.append("EMP1")
 
             label_feats = []
+            #motif_label_feats = []
             labels = []
             for d in train_loader:
                 d = d.to(self.device)
-                __, emb = model(d)
-                label_feats.append(emb)
+                feat_emb, out_emb = model(d)
+                label_feats.append(out_emb)
+                #motif_label_feats.append(feat_emb)
                 labels.append(d.y)
 
             with torch.no_grad():
@@ -317,6 +325,15 @@ class FineTune(object):
                 linit1 = torch.mean(label_feats[torch.nonzero(labels == 1)[:, 0]], dim=0)
 
                 label_feats = torch.vstack((linit0, linit1)).to(self.device)
+
+                #motif_label_feats = torch.cat(motif_label_feats)
+                
+                #mlinit0 = torch.mean(motif_label_feats[torch.nonzero(labels == 0)[:, 0]], dim=0)
+                #mlinit1 = torch.mean(motif_label_feats[torch.nonzero(labels == 0)[:, 0]], dim=0)
+
+                #motif_label_feats = torch.vstack((mlinit0, mlinit1)).to(self.device)
+
+                #motif_feats = torch.cat((motif_feats, motif_label_feats), dim=0)
 
                 motif_feats = torch.cat((motif_feats, label_feats), dim=0)
 
@@ -332,7 +349,8 @@ class FineTune(object):
 
         layer_list = []
         for name, param in model.named_parameters():
-            if 'motif' in name or 'conc' in name or 'pred' in name or 'prompt' in name:
+            #if 'motif' in name or 'conc' in name or 'pred' in name or 'prompt' in name:
+            if 'clique' in name or 'motif' in name or 'conc' in name or 'pred' in name or 'prompt' in name:    
                 layer_list.append(name)
 
         params = list(map(lambda x: x[1],list(filter(lambda kv: kv[0] in layer_list, model.named_parameters()))))
@@ -388,7 +406,7 @@ class FineTune(object):
                 else:
                     loss.backward()
 
-                #nn.utils.clip_grad_norm_(model.parameters(), 128)
+                #nn.utils.clip_grad_norm_(model.parameters(),256)
                 optimizer.step()
                 #motif_optimizer.step()
                 

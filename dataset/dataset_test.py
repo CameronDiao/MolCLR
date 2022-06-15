@@ -186,6 +186,11 @@ class MolTestDatasetWrapper(object):
         self.splitting = splitting
         assert splitting in ['random', 'scaffold']
 
+    def get_full_data_loader(self):
+        train_dataset = MolTestDataset(data_path=self.data_path, target=self.target, task=self.task)
+        train_loader = DataLoader(train_dataset, batch_size=self.batch_size, num_workers=self.num_workers)
+        return train_loader
+
     def get_data_loaders(self):
         train_dataset = MolTestDataset(data_path=self.data_path, target=self.target, task=self.task)
         train_loader, valid_loader, test_loader = self.get_train_validation_data_loaders(train_dataset)

@@ -43,27 +43,36 @@ class MAB(torch.nn.Module):
         if layer_norm:
             self.ln0 = LayerNorm(dim_V)
             self.ln1 = LayerNorm(dim_V)
+            #self.ln0 = ScaleNorm(1 / math.sqrt(dim_V))
+            #self.ln1 = ScaleNorm(1 / math.sqrt(dim_V))
 
-        self.fc_o1 = Linear(dim_V, dim_V)
-        self.fc_o2 = Linear(dim_V, dim_V)
-        self.fc_o3 = Linear(dim_V, dim_V)
+        self.fc_o = Linear(dim_V, dim_V)
+        self.ffn = nn.Sequential(
+                       nn.Linear(dim_V, dim_V),
+                       nn.ReLU(),
+                       nn.Linear(dim_V, dim_V)
+                   )
 
     def reset_parameters(self):
         self.fc_q.reset_parameters()
-        nn.init.zeros_(self.fc_q.bias.data)
+        #nn.init.xavier_uniform_(self.fc_q.weight.data)
+        nn.init.constant_(self.fc_q.bias.data, 0.01)
         self.layer_k.reset_parameters()
-        nn.init.zeros_(self.layer_k.bias.data)
+        #nn.init.xavier_uniform_(self.layer_k.weight.data)
+        nn.init.constant_(self.layer_k.bias.data, 0.01)
         self.layer_v.reset_parameters()
-        nn.init.zeros_(self.layer_v.bias.data)
+        #nn.init.xavier_uniform_(self.layer_v.weight.data)
+        nn.init.constant_(self.layer_v.bias.data, 0.01)
         if self.layer_norm:
             self.ln0.reset_parameters()
             self.ln1.reset_parameters()
-        self.fc_o1.reset_parameters()
-        nn.init.zeros_(self.fc_o1.bias.data)
-        self.fc_o2.reset_parameters()
-        nn.init.zeros_(self.fc_o2.bias.data)
-        self.fc_o3.reset_parameters()
-        nn.init.zeros_(self.fc_o3.bias.data)
+        self.fc_o.reset_parameters()
+        #nn.init.xavier_uniform_(self.fc_o.weight.data)
+        nn.init.constant_(self.fc_o.bias.data, 0.01)
+        for layer in self.ffn:
+            if isinstance(layer, nn.Linear):
+                #nn.init.xavier_uniform_(layer.weight.data)
+                nn.init.constant_(layer.bias.data, 0.01)
         pass
 
     def forward(
@@ -75,20 +84,21 @@ class MAB(torch.nn.Module):
     ) -> Tensor:
 
         num_queries = Q.shape[1]
-        Q = self.fc_q(Q)
+        num_values = K.shape[1]
+        Qn = self.fc_q(Q)
 
         if graph is not None:
             x, edge_index, batch = graph
-            K, V = self.layer_k(x, edge_index), self.layer_v(x, edge_index)
-            K, _ = to_dense_batch(K, batch)
-            V, _ = to_dense_batch(V, batch)
+            Kn, Vn = self.layer_k(x, edge_index), self.layer_v(x, edge_index)
+            Kn, _ = to_dense_batch(Kn, batch)
+            Vn, _ = to_dense_batch(Vn, batch)
         else:
-            K, V = self.layer_k(K), self.layer_v(K)
+            Kn, Vn = self.layer_k(K), self.layer_v(K)
 
         dim_split = self.dim_V // self.num_heads
-        Q_ = torch.cat(Q.split(dim_split, 2), dim=0)
-        K_ = torch.cat(K.split(dim_split, 2), dim=0)
-        V_ = torch.cat(V.split(dim_split, 2), dim=0)
+        Q_ = torch.cat(Qn.split(dim_split, 2), dim=0)
+        K_ = torch.cat(Kn.split(dim_split, 2), dim=0)
+        V_ = torch.cat(Vn.split(dim_split, 2), dim=0)
 
         if mask is not None:
             #mask = torch.cat([mask for _ in range(self.num_heads)], 0)            
@@ -105,13 +115,13 @@ class MAB(torch.nn.Module):
 
         #out = torch.cat((Q_ + A.bmm(V_)).split(Q.size(0), 0), 2)
         out = torch.cat(A.bmm(V_).split(Q.size(0), 0), 2)
-        out = Q + self.fc_o1(out)
+        out = Qn + self.fc_o(out)
 
         if self.layer_norm:
             out = self.ln0(out)
 
-        #out = out + self.fc_o1(out).relu()
-        out = out + self.fc_o3(self.fc_o2(out).relu())
+        #out = out + self.fc_o(out).relu()
+        out = out + self.ffn(out)
 
         if self.layer_norm:
             out = self.ln1(out)
@@ -390,10 +400,10 @@ class GINet(nn.Module):
         elif self.task == 'regression':
             out_dim = 1
       
-        self.motif_embedding = nn.Embedding(num_motifs, self.feat_dim//2)
-        nn.init.xavier_uniform_(self.motif_embedding.weight.data)
+        self.clique_embedding = nn.Embedding(num_motifs, self.feat_dim//2)
 
         #self.motif_norm = LayerNorm(self.feat_dim//2)
+        #self.motif_norm.reset_parameters()
 
         #self.motif_pool = GlobalAttention(gate_nn=nn.Sequential(nn.Linear(self.feat_dim, 1)),
         #                                  nn=nn.Sequential(nn.Linear(self.feat_dim, self.feat_dim//2)))
@@ -406,6 +416,11 @@ class GINet(nn.Module):
         self.motif_pool = MAB(self.feat_dim//2, self.feat_dim//2, self.feat_dim//2, num_heads=4, layer_norm=True)
         self.motif_pool.reset_parameters()
 
+        #self.motif_enc = nn.Linear(self.feat_dim//2, self.feat_dim//2)
+        #nn.init.constant_(self.motif_enc.bias.data, 0.01)
+        self.motif_dec = nn.Linear(self.feat_dim//2, self.feat_dim//2)
+        nn.init.constant_(self.motif_dec.bias.data, 0.01)
+
         #self.motif_lin = nn.Sequential(
         #                     nn.Linear(self.feat_dim//2, self.feat_dim//2),
         #                     nn.ReLU(inplace=True),
@@ -413,12 +428,13 @@ class GINet(nn.Module):
         #                 )
         #for layer in self.motif_lin:
         #    if isinstance(layer, nn.Linear):
-        #        nn.init.xavier_uniform_(layer.weight.data, gain=nn.init.calculate_gain('relu'))
+        #        #nn.init.xavier_uniform_(layer.weight.data, gain=nn.init.calculate_gain('relu'))
         #        nn.init.zeros_(layer.bias.data)
-        self.motif_lin = nn.Linear(self.feat_dim//2, self.feat_dim//2)
-        nn.init.zeros_(self.motif_lin.bias.data)
+        #self.motif_lin = nn.Linear(self.feat_dim//2, self.feat_dim//2)
+        #nn.init.zeros_(self.motif_lin.bias.data)
 
         self.conc_norm1 = LayerNorm(self.feat_dim)
+        self.conc_norm1.reset_parameters()
         #self.conc_norm2 = LayerNorm(self.feat_dim//2)
 
         self.pred_n_layer = max(1, pred_n_layer)
@@ -448,9 +464,9 @@ class GINet(nn.Module):
  
         #pred_head.append(nn.Linear(self.feat_dim//2, out_dim))
         self.pred_head = nn.Sequential(*pred_head)
-        for layer in self.pred_head:
-            if isinstance(layer, nn.Linear):
-                nn.init.zeros_(layer.bias.data)
+        #for layer in self.pred_head:
+        #    if isinstance(layer, nn.Linear):
+        #        nn.init.constant_(layer.bias.data, 0.01)
 
         #self.prompt = nn.Linear(self.feat_dim//2, out_dim, bias=False)
         self.prompt_w = nn.Parameter(torch.Tensor(out_dim, self.feat_dim//2))
@@ -468,7 +484,7 @@ class GINet(nn.Module):
 
     def init_clique_emb(self, init):
         with torch.no_grad():
-            self.motif_embedding.weight.data.copy_(init)
+            self.clique_embedding.weight.data.copy_(init)
 
     def forward(self, data, mol_idx, clique_idx):
         x = data.x
@@ -488,22 +504,21 @@ class GINet(nn.Module):
         h = self.feat_lin(h)
         h = self.out_lin(h)
         
-        hp = self.motif_embedding(clique_idx)
+        hp = self.clique_embedding(clique_idx)
         batch, mask = to_dense_batch(hp, mol_idx)
         #mask = (~mask).unsqueeze(1).to(dtype=hp.dtype) * -1e9
         mask = mask.unsqueeze(1)
+        #batch = self.motif_enc(batch)
         #batch = self.motif_norm(batch)
-        batch = self.motif_pool(h.unsqueeze(1), batch, None, mask)
-        #batch = self.motif_pool(batch, None, mask)
-        batch = self.motif_lin(batch)
+        batch = self.motif_pool(h.detach().unsqueeze(1), batch, None, mask)
+        batch = self.motif_dec(batch)
         hp = batch.squeeze(1)
 
-        #hp = torch.cat((F.normalize(h, dim=1), F.normalize(hp, dim=1)), dim=1)
         hp = torch.cat((h, hp), dim=1)
-        hp = self.conc_norm1(hp)
+        hp = F.normalize(hp, dim=1)
+        #hp = self.conc_norm1(hp)
         
-        #hp = F.normalize(h + self.conc_lin(hp), dim=1)
-        #hp = self.conc_norm2(h + self.conc_lin(hp))
+        #hp = self.conc_norm1(h + hp)
         hp = self.pred_head(hp)
         #hp = self.conc_norm2(hp)
         pw = F.normalize(self.prompt_w, dim=1)
