@@ -11,6 +11,7 @@ import torch.nn.functional as F
 
 from torch_geometric.data.batch import Batch
 from torch_geometric.nn import GCNConv
+from torch_geometric.nn import GINConv
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import to_dense_batch
 from torch_geometric.utils import add_self_loops
@@ -55,24 +56,20 @@ class MAB(torch.nn.Module):
 
     def reset_parameters(self):
         self.fc_q.reset_parameters()
-        #nn.init.xavier_uniform_(self.fc_q.weight.data)
-        nn.init.constant_(self.fc_q.bias.data, 0.01)
+        #nn.init.constant_(self.fc_q.bias.data, 0.01)
         self.layer_k.reset_parameters()
-        #nn.init.xavier_uniform_(self.layer_k.weight.data)
-        nn.init.constant_(self.layer_k.bias.data, 0.01)
+        #nn.init.constant_(self.layer_k.bias.data, 0.01)
         self.layer_v.reset_parameters()
-        #nn.init.xavier_uniform_(self.layer_v.weight.data)
-        nn.init.constant_(self.layer_v.bias.data, 0.01)
+        #nn.init.constant_(self.layer_v.bias.data, 0.01)
         if self.layer_norm:
             self.ln0.reset_parameters()
             self.ln1.reset_parameters()
         self.fc_o.reset_parameters()
-        #nn.init.xavier_uniform_(self.fc_o.weight.data)
-        nn.init.constant_(self.fc_o.bias.data, 0.01)
+        #nn.init.constant_(self.fc_o.bias.data, 0.01)
         for layer in self.ffn:
             if isinstance(layer, nn.Linear):
-                #nn.init.xavier_uniform_(layer.weight.data)
-                nn.init.constant_(layer.bias.data, 0.01)
+                 layer.reset_parameters()
+                 #nn.init.constant_(layer.bias.data, 0.01)
         pass
 
     def forward(
@@ -115,7 +112,7 @@ class MAB(torch.nn.Module):
 
         #out = torch.cat((Q_ + A.bmm(V_)).split(Q.size(0), 0), 2)
         out = torch.cat(A.bmm(V_).split(Q.size(0), 0), 2)
-        out = Qn + self.fc_o(out)
+        out = Q + self.fc_o(out)
 
         if self.layer_norm:
             out = self.ln0(out)
@@ -413,13 +410,14 @@ class GINet(nn.Module):
         
         #self.motif_pool = PMA(channels=self.feat_dim//2, num_heads=4, num_seeds=1)
         
-        self.motif_pool = MAB(self.feat_dim//2, self.feat_dim//2, self.feat_dim//2, num_heads=4, layer_norm=True)
+        self.motif_pool = MAB(self.feat_dim//2, self.feat_dim//2, self.feat_dim//2, num_heads=4, 
+                Conv=GCNConv, layer_norm=True)
         self.motif_pool.reset_parameters()
 
-        #self.motif_enc = nn.Linear(self.feat_dim//2, self.feat_dim//2)
+        self.motif_enc = nn.Linear(self.feat_dim//2, self.feat_dim//2)
         #nn.init.constant_(self.motif_enc.bias.data, 0.01)
         self.motif_dec = nn.Linear(self.feat_dim//2, self.feat_dim//2)
-        nn.init.constant_(self.motif_dec.bias.data, 0.01)
+        #nn.init.constant_(self.motif_dec.bias.data, 0.01)
 
         #self.motif_lin = nn.Sequential(
         #                     nn.Linear(self.feat_dim//2, self.feat_dim//2),
@@ -486,7 +484,7 @@ class GINet(nn.Module):
         with torch.no_grad():
             self.clique_embedding.weight.data.copy_(init)
 
-    def forward(self, data, mol_idx, clique_idx):
+    def forward(self, data, mol_idx, clique_idx, edge_idx):
         x = data.x
         edge_index = data.edge_index
         edge_attr = data.edge_attr
@@ -508,15 +506,16 @@ class GINet(nn.Module):
         batch, mask = to_dense_batch(hp, mol_idx)
         #mask = (~mask).unsqueeze(1).to(dtype=hp.dtype) * -1e9
         mask = mask.unsqueeze(1)
-        #batch = self.motif_enc(batch)
+        batch = self.motif_enc(batch)
         #batch = self.motif_norm(batch)
-        batch = self.motif_pool(h.detach().unsqueeze(1), batch, None, mask)
+        graph = (hp, edge_idx, mol_idx)
+        batch = self.motif_pool(h.detach().unsqueeze(1), batch, graph, mask)
         batch = self.motif_dec(batch)
         hp = batch.squeeze(1)
 
         hp = torch.cat((h, hp), dim=1)
-        hp = F.normalize(hp, dim=1)
-        #hp = self.conc_norm1(hp)
+        #hp = F.normalize(hp, dim=1)
+        hp = self.conc_norm1(hp)
         
         #hp = self.conc_norm1(h + hp)
         hp = self.pred_head(hp)
