@@ -40,6 +40,13 @@ class MAB(torch.nn.Module):
         else:
             self.layer_k = Conv(dim_K, dim_V)
             self.layer_v = Conv(dim_K, dim_V)
+            #self.layer_k = Conv(nn = nn.Sequential(nn.Linear(dim_K, 2 * dim_K),
+            #                                       nn.ReLU(),
+            #                                       nn.Linear(2 * dim_K, dim_V)))
+            #self.layer_v = Conv(nn = nn.Sequential(nn.Linear(dim_K, 2 * dim_K),
+            #                                       nn.ReLU(),
+            #                                       nn.Linear(2 * dim_K, dim_V)))
+
 
         if layer_norm:
             self.ln0 = LayerNorm(dim_V)
@@ -49,9 +56,9 @@ class MAB(torch.nn.Module):
 
         self.fc_o = Linear(dim_V, dim_V)
         self.ffn = nn.Sequential(
-                       nn.Linear(dim_V, dim_V),
+                       nn.Linear(dim_V, 2 * dim_V),
                        nn.ReLU(),
-                       nn.Linear(dim_V, dim_V)
+                       nn.Linear(2 * dim_V, dim_V)
                    )
 
     def reset_parameters(self):
@@ -112,7 +119,7 @@ class MAB(torch.nn.Module):
 
         #out = torch.cat((Q_ + A.bmm(V_)).split(Q.size(0), 0), 2)
         out = torch.cat(A.bmm(V_).split(Q.size(0), 0), 2)
-        out = Q + self.fc_o(out)
+        out = Qn + self.fc_o(out)
 
         if self.layer_norm:
             out = self.ln0(out)
@@ -414,9 +421,12 @@ class GINet(nn.Module):
                 Conv=GCNConv, layer_norm=True)
         self.motif_pool.reset_parameters()
 
-        self.motif_enc = nn.Linear(self.feat_dim//2, self.feat_dim//2)
+        #self.motif_enc = nn.Linear(self.feat_dim//2, self.feat_dim//2)
         #nn.init.constant_(self.motif_enc.bias.data, 0.01)
-        self.motif_dec = nn.Linear(self.feat_dim//2, self.feat_dim//2)
+        self.motif_dec = nn.Sequential(
+                             nn.Linear(self.feat_dim//2, self.feat_dim//2),
+                             nn.ReLU()
+                         )
         #nn.init.constant_(self.motif_dec.bias.data, 0.01)
 
         #self.motif_lin = nn.Sequential(
@@ -506,7 +516,7 @@ class GINet(nn.Module):
         batch, mask = to_dense_batch(hp, mol_idx)
         #mask = (~mask).unsqueeze(1).to(dtype=hp.dtype) * -1e9
         mask = mask.unsqueeze(1)
-        batch = self.motif_enc(batch)
+        #batch = self.motif_enc(batch)
         #batch = self.motif_norm(batch)
         graph = (hp, edge_idx, mol_idx)
         batch = self.motif_pool(h.detach().unsqueeze(1), batch, graph, mask)

@@ -267,10 +267,9 @@ class FineTune(object):
                     edge_idx[0].append(node.clique_idx)
                     edge_idx[1].append(nbr.clique_idx)
         new_edge_idx = [[], []]
-        for e1 in edge_idx[0]:
-            for e2 in edge_idx[1]:
-                new_edge_idx[0].append(clique_idx.index(e1))
-                new_edge_idx[1].append(clique_idx.index(e2))
+        for i in range(len(edge_idx[0])):
+            new_edge_idx[0].append(clique_idx.index(edge_idx[0][i]))
+            new_edge_idx[1].append(clique_idx.index(edge_idx[1][i]))
         mol_idx = torch.tensor(mol_idx).to(self.device)
         clique_idx = torch.tensor(clique_idx).to(self.device)
         edge_idx = torch.vstack([torch.tensor(lst) for lst in new_edge_idx]).to(self.device)
