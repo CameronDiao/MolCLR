@@ -56,23 +56,24 @@ class MAB(torch.nn.Module):
     def reset_parameters(self):
         self.fc_q.reset_parameters()
         #nn.init.xavier_uniform_(self.fc_q.weight.data)
-        nn.init.constant_(self.fc_q.bias.data, 0.01)
+        #nn.init.constant_(self.fc_q.bias.data, 0.01)
         self.layer_k.reset_parameters()
         #nn.init.xavier_uniform_(self.layer_k.weight.data)
-        nn.init.constant_(self.layer_k.bias.data, 0.01)
+        #nn.init.constant_(self.layer_k.bias.data, 0.01)
         self.layer_v.reset_parameters()
         #nn.init.xavier_uniform_(self.layer_v.weight.data)
-        nn.init.constant_(self.layer_v.bias.data, 0.01)
+        #nn.init.constant_(self.layer_v.bias.data, 0.01)
         if self.layer_norm:
             self.ln0.reset_parameters()
             self.ln1.reset_parameters()
         self.fc_o.reset_parameters()
         #nn.init.xavier_uniform_(self.fc_o.weight.data)
-        nn.init.constant_(self.fc_o.bias.data, 0.01)
+        #nn.init.constant_(self.fc_o.bias.data, 0.01)
         for layer in self.ffn:
             if isinstance(layer, nn.Linear):
+                layer.reset_parameters()
                 #nn.init.xavier_uniform_(layer.weight.data)
-                nn.init.constant_(layer.bias.data, 0.01)
+                #nn.init.constant_(layer.bias.data, 0.01)
         pass
 
     def forward(
@@ -417,9 +418,10 @@ class GINet(nn.Module):
         self.motif_pool.reset_parameters()
 
         #self.motif_enc = nn.Linear(self.feat_dim//2, self.feat_dim//2)
-        #nn.init.constant_(self.motif_enc.bias.data, 0.01)
-        self.motif_dec = nn.Linear(self.feat_dim//2, self.feat_dim//2)
-        nn.init.constant_(self.motif_dec.bias.data, 0.01)
+        self.motif_dec = nn.Sequential(
+                nn.Linear(self.feat_dim//2, self.feat_dim//2),
+                nn.ReLU()
+        )
 
         #self.motif_lin = nn.Sequential(
         #                     nn.Linear(self.feat_dim//2, self.feat_dim//2),
@@ -433,7 +435,7 @@ class GINet(nn.Module):
         #self.motif_lin = nn.Linear(self.feat_dim//2, self.feat_dim//2)
         #nn.init.zeros_(self.motif_lin.bias.data)
 
-        self.conc_norm1 = LayerNorm(self.feat_dim)
+        self.conc_norm1 = LayerNorm(self.feat_dim//2)
         self.conc_norm1.reset_parameters()
         #self.conc_norm2 = LayerNorm(self.feat_dim//2)
 
@@ -441,7 +443,7 @@ class GINet(nn.Module):
 
         if pred_act == 'relu':
             pred_head = [
-                nn.Linear(self.feat_dim, self.feat_dim//2), 
+                nn.Linear(self.feat_dim//2, self.feat_dim//2), 
                 nn.ReLU(inplace=True)
             ]
             for _ in range(self.pred_n_layer - 1):
@@ -451,7 +453,7 @@ class GINet(nn.Module):
                 ])
         elif pred_act == 'softplus':
             pred_head = [
-                nn.Linear(self.feat_dim, self.feat_dim//2), 
+                nn.Linear(self.feat_dim//2, self.feat_dim//2), 
                 nn.Softplus(),
             ]
             for _ in range(self.pred_n_layer - 1):
@@ -514,11 +516,10 @@ class GINet(nn.Module):
         batch = self.motif_dec(batch)
         hp = batch.squeeze(1)
 
-        hp = torch.cat((h, hp), dim=1)
-        hp = F.normalize(hp, dim=1)
+        #hp = torch.cat((h, hp), dim=1)
         #hp = self.conc_norm1(hp)
         
-        #hp = self.conc_norm1(h + hp)
+        hp = self.conc_norm1(h + hp)
         hp = self.pred_head(hp)
         #hp = self.conc_norm2(hp)
         pw = F.normalize(self.prompt_w, dim=1)
