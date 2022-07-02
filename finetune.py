@@ -107,8 +107,6 @@ def _ortho_constraint(device, prompt):
 #
 #    return (torch.norm(sigma, 2))**2
 
-def _ortho_learning_rate(init_lr, epoch):
-    return 0.1 * init_lr
 
 class Normalizer(object):
     """Normalize a Tensor and restore it later. """
@@ -166,7 +164,7 @@ class FineTune(object):
         __, pred = model(data, mol_idx, clique_idx)
         if self.config['dataset']['task'] == 'classification':
             loss = self.criterion(pred, data.y.flatten())
-            loss += _ortho_learning_rate(self.config['init_base_lr'], epoch) * _ortho_constraint(self.device, model.get_label_emb())
+            loss += self.config['ortho_weight'] * _ortho_constraint(self.device, model.get_label_emb())
         elif self.config['dataset']['task'] == 'regression':
             if self.normalizer:
                 loss = self.criterion(pred, self.normalizer.norm(data.y))
@@ -212,6 +210,8 @@ class FineTune(object):
             mol_to_clique[mol]['EMP0'] = 1
             mol_to_clique[mol]['EMP1'] = 1
             #if all(clique in fil_clique_list for clique in mol_to_clique[mol]):
+            #    mol_to_clique[mol]['EMP0'] = 1
+            #    mol_to_clique[mol]['EMP1'] = 1
             if len(tmol_to_clique[mol]) == 0:
                 emp_mol.append(mol)
 
@@ -398,7 +398,7 @@ class FineTune(object):
 
                 if n_iter % self.config['log_every_n_steps'] == 0:
                     self.writer.add_scalar('train_loss', loss, global_step=n_iter)
-                    print(epoch_counter, bn, loss.item())
+                    print(epoch_counter, bn, loss.detach().item())
 
                 if apex_support and self.config['fp16_precision']:
                     with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -406,7 +406,7 @@ class FineTune(object):
                 else:
                     loss.backward()
 
-                #nn.utils.clip_grad_norm_(model.parameters(),256)
+                #nn.utils.clip_grad_norm_(model.parameters(), 32)
                 optimizer.step()
                 #motif_optimizer.step()
                 
@@ -432,7 +432,7 @@ class FineTune(object):
 
                 self.writer.add_scalar('validation_loss', valid_loss, global_step=valid_n_iter)
                 valid_n_iter += 1
-        
+
         self._test(model, test_loader, clique_list, mol_to_clique)
 
     def _load_pre_trained_weights(self, model):
@@ -463,7 +463,7 @@ class FineTune(object):
                 __, pred = model(data, mol_idx, clique_idx)
                 loss = self._step(model, data, bn, mol_idx, clique_idx)
 
-                valid_loss += loss.item() * data.y.size(0)
+                valid_loss += loss.detach().item() * data.y.size(0)
                 num_data += data.y.size(0)
 
                 if self.normalizer:
@@ -521,7 +521,7 @@ class FineTune(object):
                 __, pred = model(data, mol_idx, clique_idx)
                 loss = self._step(model, data, bn, mol_idx, clique_idx)
 
-                test_loss += loss.item() * data.y.size(0)
+                test_loss += loss.detach().item() * data.y.size(0)
                 num_data += data.y.size(0)
 
                 if self.normalizer:
