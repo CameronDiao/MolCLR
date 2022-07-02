@@ -35,7 +35,7 @@ def _weight_reset(block):
 
 class MAB(torch.nn.Module):
     r"""Multihead-Attention Block."""
-    def __init__(self, dim_Q: int, dim_K: int, dim_V: int, num_heads: int, dropout: float,
+    def __init__(self, dim_Q: int, dim_K: int, dim_V: int, num_heads: int, dropout: float = 0.0,
                  Conv: Optional[Type]  = None, layer_norm: bool = False):
         super().__init__()
         self.dim_V = dim_V
@@ -158,7 +158,6 @@ class PMA(torch.nn.Module):
         self.S = torch.nn.Parameter(torch.Tensor(1, num_seeds, channels))
         self.mab = MAB(channels, channels, channels, num_heads, Conv=Conv,
                        layer_norm=layer_norm)
-        self.reset_parameters()
 
     def reset_parameters(self):
         torch.nn.init.xavier_uniform_(self.S)
@@ -410,22 +409,24 @@ class GINet(nn.Module):
         #                                           out_channels=self.feat_dim//2, pool_sequences=["SelfAtt", "GMPool_I"])
         
         #self.motif_pool = PMA(channels=self.feat_dim//2, num_heads=4, num_seeds=1)
-        
+        #self.motif_pool.reset_parameters()
+
         self.motif_pool = MAB(self.feat_dim//2, self.feat_dim//2, self.feat_dim//2, num_heads=4, dropout=0.0, layer_norm=True)
         self.motif_pool.reset_parameters()
 
         self.motif_enc = nn.Sequential(
-                nn.Linear(self.feat_dim//2, self.feat_dim//2)
+                nn.Linear(self.feat_dim//2, self.feat_dim//2),
         )
         _weight_reset(self.motif_enc)
         self.motif_dec = nn.Sequential(
-                nn.Linear(self.feat_dim//2, self.feat_dim//2)
+                nn.Linear(self.feat_dim//2, self.feat_dim//2),
         )
         _weight_reset(self.motif_dec)
 
         self.conc_norm1 = LayerNorm(self.feat_dim)
         _weight_reset(self.conc_norm1)
         #self.conc_norm2 = LayerNorm(self.feat_dim//2)
+        #_weight_reset(self.conc_norm2)
 
         self.pred_n_layer = max(1, pred_n_layer)
 
