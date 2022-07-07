@@ -61,7 +61,7 @@ class MAB(torch.nn.Module):
         self.fc_o = Linear(dim_V, dim_V)
         self.ffn = nn.Sequential(
                        nn.Linear(dim_V, dim_V),
-                       nn.ReLU(),
+                       nn.ReLU(inplace=True),
                        nn.Linear(dim_V, dim_V)
                    )
 
@@ -411,8 +411,11 @@ class GINet(nn.Module):
         #self.motif_pool = PMA(channels=self.feat_dim//2, num_heads=4, num_seeds=1)
         #self.motif_pool.reset_parameters()
 
-        self.motif_pool = MAB(self.feat_dim//2, self.feat_dim//2, self.feat_dim//2, num_heads=4, dropout=0.0, layer_norm=True)
+        self.motif_pool = MAB(self.feat_dim//2, self.feat_dim//2, self.feat_dim//2, num_heads=4)
         self.motif_pool.reset_parameters()
+
+        self.motif_norm1 = LayerNorm(self.feat_dim//2)
+        _weight_reset(self.motif_norm1)
 
         self.motif_enc = nn.Sequential(
                 nn.Linear(self.feat_dim//2, self.feat_dim//2),
@@ -423,8 +426,8 @@ class GINet(nn.Module):
         )
         _weight_reset(self.motif_dec)
 
-        self.conc_norm1 = LayerNorm(self.feat_dim)
-        _weight_reset(self.conc_norm1)
+        #self.conc_norm1 = LayerNorm(self.feat_dim) 
+        #_weight_reset(self.conc_norm1)
         #self.conc_norm2 = LayerNorm(self.feat_dim//2)
         #_weight_reset(self.conc_norm2)
 
@@ -497,6 +500,7 @@ class GINet(nn.Module):
         #mask = (~mask).unsqueeze(1).to(dtype=hp.dtype) * -1e9
         mask = mask.unsqueeze(1)
         batch = self.motif_enc(batch)
+        batch = self.motif_norm1(batch)
         batch = F.dropout(batch, self.drop_ratio, training=self.training) 
         batch = self.motif_pool(h.detach().unsqueeze(1), batch, None, mask)
         batch = self.motif_dec(batch)
@@ -504,7 +508,8 @@ class GINet(nn.Module):
         hp = batch.squeeze(1)
 
         hp = torch.cat((h, hp), dim=1)
-        hp = self.conc_norm1(hp)
+        hp = F.normalize(hp, dim=1)
+        #hp = self.conc_norm1(hp)
         
         #hp = self.conc_norm1(h + hp)
         hp = self.pred_head(hp)

@@ -23,7 +23,7 @@ import dgl
 from dataset.dataset_test import MolTestDatasetWrapper
 from dataset.dataset_clique import MolCliqueDatasetWrapper
 #from dataset.dataset_clique import MolCliqueDataset
-from utils.clique import get_mol, get_smiles, sanitize, get_clique_mol, brics_decomp
+from utils.clique import get_mol, get_smiles, sanitize, get_clique_mol, brics_decomp, tree_decomp
 
 apex_support = False
 try:
@@ -180,6 +180,8 @@ class FineTune(object):
             mol_to_clique[i] = {}
             mol = get_mol(m)
             cliques, edges  = brics_decomp(mol)
+            if len(edges) <= 1:
+                cliques, edges = tree_decomp(mol)
             for c in cliques:
                 cmol = get_clique_mol(mol, c)
                 cs = get_smiles(cmol)
@@ -209,7 +211,7 @@ class FineTune(object):
         for mol in tmol_to_clique:
             mol_to_clique[mol]['EMP0'] = 1
             mol_to_clique[mol]['EMP1'] = 1
-            #if all(clique in fil_clique_list for clique in mol_to_clique[mol]):
+            #if all(clique in fil_clique_list for clique in tmol_to_clique[mol]):
             #    mol_to_clique[mol]['EMP0'] = 1
             #    mol_to_clique[mol]['EMP1'] = 1
             if len(tmol_to_clique[mol]) == 0:
