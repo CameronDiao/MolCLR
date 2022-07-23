@@ -150,7 +150,13 @@ class MolTreeNode(object):
 
         self.clique = [x for x in clique] #copy
         self.neighbors = []
-        
+      
+    def __eq__(self, obj):
+        if hasattr(obj, 'smiles'):
+            return self.smiles == obj.smiles
+        else:
+            return False
+
     def add_neighbor(self, nei_node):
         self.neighbors.append(nei_node)
 

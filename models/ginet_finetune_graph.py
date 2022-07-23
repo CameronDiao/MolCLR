@@ -8,10 +8,9 @@ from torch.nn import LayerNorm, Linear
 from torch.nn.utils import weight_norm
 
 import torch.nn.functional as F
-from torch.nn.init import _calculate_fan_in_and_fan_out, _no_grad_normal_, _no_grad_uniform_
 
 from torch_geometric.data.batch import Batch
-from torch_geometric.nn import GCNConv
+from torch_geometric.nn import GCNConv, SAGEConv
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import to_dense_batch
 from torch_geometric.utils import add_self_loops
@@ -22,21 +21,6 @@ num_chirality_tag = 3
 
 num_bond_type = 5 # including aromatic and self-loop edge
 num_bond_direction = 3 
-
-def xavier_normal_small_init_(tensor, gain=1.):
-    # type: (Tensor, float) -> Tensor
-    fan_in, fan_out = _calculate_fan_in_and_fan_out(tensor)
-    std = gain * math.sqrt(2.0 / float(fan_in + 4*fan_out))
-
-    return _no_grad_normal_(tensor, 0., std)
-
-def xavier_uniform_small_init_(tensor, gain=1.):
-    # type: (Tensor, float) -> Tensor
-    fan_in, fan_out = _calculate_fan_in_and_fan_out(tensor)
-    std = gain * math.sqrt(2.0 / float(fan_in + 4*fan_out))
-    a = math.sqrt(3.0) * std  # Calculate uniform bounds from standard deviation
-
-    return _no_grad_uniform_(tensor, -a, a)
 
 def _weight_reset(block):
     try:
@@ -372,21 +356,13 @@ class GINet(nn.Module):
     """
     def __init__(self, 
         num_motifs, task='classification', num_layer=5, emb_dim=300, feat_dim=512, 
-        drop_ratio=0, enc_dropout=0, tfm_dropout=0, dec_dropout=0,
-        enc_ln=True, tfm_ln=False, conc_ln=False, 
-        pool='mean', pred_n_layer=2, n_heads=4, pred_act='softplus'
+        drop_ratio=0, pool='mean', pred_n_layer=2, pred_act='softplus'
     ):
         super(GINet, self).__init__()
         self.num_layer = num_layer
         self.emb_dim = emb_dim
         self.feat_dim = feat_dim
         self.drop_ratio = drop_ratio
-        self.enc_dropout = enc_dropout
-        self.tfm_dropout = tfm_dropout
-        self.dec_dropout = dec_dropout
-        self.enc_ln = enc_ln
-        self.tfm_ln = tfm_ln
-        self.conc_ln = conc_ln
         self.task = task
 
         self.x_embedding1 = nn.Embedding(num_atom_type, emb_dim)
@@ -426,7 +402,8 @@ class GINet(nn.Module):
       
         self.clique_embedding = nn.Embedding(num_motifs, self.feat_dim//2)
 
-        #self.motif_pool = GlobalAttention(gate_nn=nn.Sequential(nn.Linear(self.feat_dim//2, 1)))
+        #self.motif_pool = GlobalAttention(gate_nn=nn.Sequential(nn.Linear(self.feat_dim, 1)),
+        #                                  nn=nn.Sequential(nn.Linear(self.feat_dim, self.feat_dim//2)))
 
         #self.motif_pool = GraphMultisetTransformer(in_channels=self.feat_dim//2, hidden_channels=self.feat_dim,
         #                                           out_channels=self.feat_dim//2, pool_sequences=["SelfAtt", "GMPool_I"])
@@ -434,26 +411,24 @@ class GINet(nn.Module):
         #self.motif_pool = PMA(channels=self.feat_dim//2, num_heads=4, num_seeds=1)
         #self.motif_pool.reset_parameters()
 
-        self.motif_pool = MAB(self.feat_dim//2, self.feat_dim//2, self.feat_dim//2, num_heads=n_heads, dropout=self.tfm_dropout,
-                layer_norm=self.tfm_ln)
+        self.motif_pool = MAB(self.feat_dim//2, self.feat_dim//2, self.feat_dim//2, num_heads=4)
         self.motif_pool.reset_parameters()
 
-        if self.enc_ln:
-            self.motif_norm1 = LayerNorm(self.feat_dim//2)
-            _weight_reset(self.motif_norm1)
+        self.motif_norm1 = LayerNorm(self.feat_dim//2)
+        _weight_reset(self.motif_norm1)
 
-        self.motif_enc = nn.Sequential(
-                nn.Linear(self.feat_dim//2, self.feat_dim//2),
-        )
+        #self.motif_enc = nn.Sequential(
+        #        nn.Linear(self.feat_dim//2, self.feat_dim//2),
+        #)
+        self.motif_enc = GCNConv(self.feat_dim//2, self.feat_dim//2)
         _weight_reset(self.motif_enc)
         self.motif_dec = nn.Sequential(
                 nn.Linear(self.feat_dim//2, self.feat_dim//2),
         )
         _weight_reset(self.motif_dec)
 
-        if self.conc_ln:
-            self.conc_norm1 = LayerNorm(self.feat_dim) 
-            _weight_reset(self.conc_norm1)
+        #self.conc_norm1 = LayerNorm(self.feat_dim) 
+        #_weight_reset(self.conc_norm1)
         #self.conc_norm2 = LayerNorm(self.feat_dim//2)
         #_weight_reset(self.conc_norm2)
 
@@ -503,7 +478,7 @@ class GINet(nn.Module):
         with torch.no_grad():
             self.clique_embedding.weight.data.copy_(init)
 
-    def forward(self, data, mol_idx, clique_idx):
+    def forward(self, data, mol_idx, clique_idx, edge_idx):
         x = data.x
         edge_index = data.edge_index
         edge_attr = data.edge_attr
@@ -522,23 +497,20 @@ class GINet(nn.Module):
         h = self.out_lin(h)
         
         hp = self.clique_embedding(clique_idx)
+        hp = self.motif_enc(hp, edge_idx)
+        hp = self.motif_norm1(hp)
+        hp = F.dropout(hp, self.drop_ratio, training=self.training)
         batch, mask = to_dense_batch(hp, mol_idx)
         #mask = (~mask).unsqueeze(1).to(dtype=hp.dtype) * -1e9
         mask = mask.unsqueeze(1)
-        batch = self.motif_enc(batch)
-        if self.enc_ln:
-            batch = self.motif_norm1(batch)
-        batch = F.dropout(batch, self.enc_dropout, training=self.training) 
         batch = self.motif_pool(h.detach().unsqueeze(1), batch, None, mask)
         batch = self.motif_dec(batch)
-        batch = F.dropout(batch, self.dec_dropout, training=self.training)
+        #batch = F.dropout(batch, self.drop_ratio, training=self.training)
         hp = batch.squeeze(1)
 
         hp = torch.cat((h, hp), dim=1)
-        if self.conc_ln:
-            hp = self.conc_norm1(hp)
-        else:
-            hp = F.normalize(hp, dim=1)
+        hp = F.normalize(hp, dim=1)
+        #hp = self.conc_norm1(hp)
         
         #hp = self.conc_norm1(h + hp)
         hp = self.pred_head(hp)

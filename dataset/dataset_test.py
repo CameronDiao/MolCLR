@@ -48,12 +48,12 @@ def _generate_scaffold(smiles, include_chirality=False):
 def generate_scaffolds(dataset, log_every_n=1000):
     scaffolds = {}
     data_len = len(dataset)
-    print(data_len)
+    #print(data_len)
 
-    print("About to generate scaffolds")
+    #print("About to generate scaffolds")
     for ind, smiles in enumerate(dataset.smiles_data):
-        if ind % log_every_n == 0:
-            print("Generating scaffold %d/%d" % (ind, data_len))
+        #if ind % log_every_n == 0:
+        #    print("Generating scaffold %d/%d" % (ind, data_len))
         scaffold = _generate_scaffold(smiles)
         if scaffold not in scaffolds:
             scaffolds[scaffold] = [ind]
@@ -79,7 +79,7 @@ def scaffold_split(dataset, valid_size, test_size, seed=None, log_every_n=1000):
     valid_inds: List[int] = []
     test_inds: List[int] = []
 
-    print("About to sort in scaffold sets")
+    #print("About to sort in scaffold sets")
     for scaffold_set in scaffold_sets:
         if len(train_inds) + len(scaffold_set) > train_cutoff:
             if len(train_inds) + len(valid_inds) + len(scaffold_set) > valid_cutoff:
@@ -108,7 +108,7 @@ def read_smiles(data_path, target, task):
                         labels.append(float(label))
                     else:
                         ValueError('task must be either regression or classification')
-    print(len(smiles_data))
+    #print(len(smiles_data))
     return smiles_data, labels
 
 class MolTestDataset(Dataset):

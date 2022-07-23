@@ -92,7 +92,8 @@ class GCNConv(MessagePassing):
 
 
 class GCN(nn.Module):
-    def __init__(self, task='classification', num_layer=5, emb_dim=300, feat_dim=256, drop_ratio=0, pool='mean'):
+    def __init__(self, task='classification', num_layer=5, emb_dim=300, feat_dim=512, drop_ratio=0, pool='mean',
+            pred_n_layer=2, pred_act='softplus'):
         super(GCN, self).__init__()
         self.num_layer = num_layer
         self.emb_dim = emb_dim
@@ -131,17 +132,37 @@ class GCN(nn.Module):
         self.feat_lin = nn.Linear(self.emb_dim, self.feat_dim)
 
         if self.task == 'classification':
-            self.pred_lin = nn.Sequential(
-                nn.Linear(self.feat_dim, self.feat_dim//2), 
-                nn.Softplus(),
-                nn.Linear(self.feat_dim//2, 2)
-            )
+            out_dim = 2
         elif self.task == 'regression':
-            self.pred_lin = nn.Sequential(
-                nn.Linear(self.feat_dim, self.feat_dim//2), 
-                nn.Softplus(),
-                nn.Linear(self.feat_dim//2, 1)
-            )
+            out_dim = 1
+
+        self.pred_n_layer = max(1, pred_n_layer)
+
+        if pred_act == 'relu':
+            pred_head = [
+                    nn.Linear(self.feat_dim, self.feat_dim//2),
+                    nn.ReLU(inplace=True)
+            ]
+            for _ in range(self.pred_n_layer - 1):
+                pred_head.extend([
+                    nn.Linear(self.feat_dim//2, self.feat_dim//2),
+                    nn.ReLU(inplace=True)
+                ])
+        elif pred_act == 'softplus':
+            pred_head = [
+                    nn.Linear(self.feat_dim, self.feat_dim//2),
+                    nn.Softplus()
+            ]
+            for _ in range(self.pred_n_layer - 1):
+                pred_head.extend([
+                    nn.Linear(self.feat_dim//2, self.feat_dim//2),
+                    nn.Softplus()
+                ])
+        else:
+            raise ValueError('Undefined activation function')
+        
+        pred_head.append(nn.Linear(self.feat_dim//2, out_dim))
+        self.pred_head = nn.Sequential(*pred_head)
 
     def forward(self, data):
         x = data.x
@@ -161,7 +182,7 @@ class GCN(nn.Module):
         h = self.pool(h, data.batch)
         h = self.feat_lin(h)
 
-        return h, self.pred_lin(h)
+        return h, self.pred_head(h)
 
     def load_my_state_dict(self, state_dict):
         own_state = self.state_dict()
@@ -172,7 +193,6 @@ class GCN(nn.Module):
                 # backwards compatibility for serialized parameters
                 param = param.data
             own_state[name].copy_(param)
-
 
 if __name__ == "__main__":
     model = GCN()
