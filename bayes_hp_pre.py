@@ -140,7 +140,7 @@ def objective(params):
     res = []
 
     for __ in range(1):
-        for target in target_list[2:7]:
+        for target in target_list[-10:]:
             torch.cuda.empty_cache()
             config['dataset']['target'] = target
             dataset = MolTestDatasetWrapper(config['batch_size'], **config['dataset'])

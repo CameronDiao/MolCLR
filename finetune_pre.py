@@ -101,6 +101,28 @@ class FineTune(object):
     def train(self):
         smiles_data, train_loader, valid_loader, test_loader = self.dataset.get_data_loaders()
 
+        labels = []
+        for d in train_loader:
+            labels.append(d.y)
+        labels = torch.cat(labels)
+        if len(torch.unique(labels)) < 2:
+            self.roc_auc = 0.
+            return
+        labels = []
+        for d in valid_loader:
+            labels.append(d.y)
+        labels = torch.cat(labels)
+        if len(torch.unique(labels)) < 2:
+            self.roc_auc = 0.
+            return
+        labels = []
+        for d in test_loader:
+            labels.append(d.y)
+        labels = torch.cat(labels)
+        if len(torch.unique(labels)) < 2:
+            self.roc_auc = 0.
+            return
+
         self.normalizer = None
         if self.config["task_name"] in ['qm7', 'qm9']:
             labels = []
@@ -188,6 +210,7 @@ class FineTune(object):
                 self.writer.add_scalar('validation_loss', valid_loss, global_step=valid_n_iter)
                 valid_n_iter += 1
 
+        print('best valid score: {}'.format(best_valid_cls))
         self._test(model, test_loader)
 
     def _load_pre_trained_weights(self, model):

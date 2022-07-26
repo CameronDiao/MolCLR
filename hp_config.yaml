@@ -4,13 +4,15 @@ eval_every_n_epochs: 1          # validation frequency
 fine_tune_from: pretrained_gcn  # sub directory of pre-trained model in ./ckpt
 log_every_n_steps: 50           # print training log frequency
 fp16_precision: False           # float precision 16 (i.e. True/False)
-#threshold: 10
+threshold: 10
 init_lr: 0.0005
 init_base_lr: 0.0005
 weight_decay: 2e-6
-#ortho_weight: 0.00001
-gpu: cuda:2                     # training GPU
-task_name: MUV                  # name of fine-tuning benchmark, inlcuding
+ortho_weight: 0.00001
+init: uniform
+vocab: mgssl
+gpu: cuda:1                     # training GPU
+task_name: BACE                 # name of fine-tuning benchmark, inlcuding
                                 # classifications: BBBP/BACE/ClinTox/Tox21/HIV/SIDER/MUV
                                 # regressions: FreeSolv/ESOL/Lipo/qm7/qm8/qm9
 
@@ -19,13 +21,13 @@ model:
   emb_dim: 300                  # embedding dimension in graph conv layers
   feat_dim: 512                 # output feature dimention
   drop_ratio: 0.0
-  #enc_dropout: 0.0
-  #tfm_dropout: 0.0
-  #dec_dropout: 0.0
-  #enc_ln: True
-  #tfm_ln: False
-  #conc_ln: False
-  #n_heads: 4
+  enc_dropout: 0.0
+  tfm_dropout: 0.0
+  dec_dropout: 0.0
+  enc_ln: True
+  tfm_ln: False
+  conc_ln: False
+  n_heads: 4
   pool: mean                    # readout pooling (i.e., mean/max/add)
   pred_act: softplus
   pred_n_layer: 2

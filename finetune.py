@@ -205,18 +205,18 @@ class FineTune(object):
         for mol in mol_to_clique:
             for clique in mol_to_clique[mol].keys():
                 if clique in fil_clique_list:
-                    #tmol_to_clique[mol]['EMP'] = 1
+                    tmol_to_clique[mol]['EMP'] = 1
                     del tmol_to_clique[mol][clique]
         
         mol_to_clique = deepcopy(tmol_to_clique)
         emp_mol = []
         for mol in tmol_to_clique:
-            #if all('EMP' in clique for clique in mol_to_clique[mol].keys()):
+            if all('EMP' in clique for clique in mol_to_clique[mol].keys()):
+                emp_mol.append(mol)
+            #    mol_to_clique[mol]['EMP'] = 1
+            #if len(tmol_to_clique[mol]) == 0:
             #    emp_mol.append(mol)
             #    mol_to_clique[mol]['EMP'] = 1
-            if len(tmol_to_clique[mol]) == 0:
-                emp_mol.append(mol)
-                mol_to_clique[mol]['EMP'] = 1
     
         clique_list = list(set(clique_list) - set(fil_clique_list))
         return emp_mol, fil_clique_list, clique_list, mol_to_clique
@@ -341,7 +341,7 @@ class FineTune(object):
                 #dummy_motif = torch.mean(emp_feats, dim=0).unsqueeze(0).to(self.device)
 
                 dummy_motif = torch.zeros((1, motif_feats.shape[1])).to(self.device)
-                #nn.init.xavier_uniform_(dummy_motif)
+                nn.init.xavier_uniform_(dummy_motif)
                 motif_feats = torch.cat((motif_feats, dummy_motif), dim=0)
 
             from models.ginet_finetune_mp_link import GINet
@@ -425,6 +425,8 @@ class FineTune(object):
                 if self.config['dataset']['task'] == 'classification': 
                     valid_loss, valid_cls = self._validate(model, valid_loader, 
                                                            clique_list, mol_to_clique)
+                    if valid_loss is None:
+                        return
                     if valid_cls > best_valid_cls:
                         # save the model weights
                         best_valid_cls = valid_cls
@@ -503,7 +505,7 @@ class FineTune(object):
             predictions = np.array(predictions)
             labels = np.array(labels)
             roc_auc = roc_auc_score(labels, predictions[:,1])
-            print('Validation loss:', valid_loss, 'ROC AUC:', roc_auc)
+            #print('Validation loss:', valid_loss, 'ROC AUC:', roc_auc)
             return valid_loss, roc_auc
 
     def _test(self, model, test_loader, clique_list, mol_to_clique):

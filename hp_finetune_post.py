@@ -23,7 +23,9 @@ import dgl
 from dataset.dataset_test import MolTestDatasetWrapper
 from dataset.dataset_clique import MolCliqueDatasetWrapper
 #from dataset.dataset_clique import MolCliqueDataset
-from utils.clique import get_mol, get_smiles, sanitize, get_clique_mol, brics_decomp, tree_decomp
+from utils import clique
+from utils import vocab
+
 
 apex_support = False
 try:
@@ -176,20 +178,34 @@ class FineTune(object):
     def _gen_cliques(self, smiles_data):
         mol_to_clique = {}
         clique_set = set()
-        for i, m in enumerate(smiles_data):
-            mol_to_clique[i] = {}
-            mol = get_mol(m)
-            cliques, edges  = brics_decomp(mol)
-            if len(edges) <= 1:
-                cliques, edges = tree_decomp(mol)
-            for c in cliques:
-                cmol = get_clique_mol(mol, c)
-                cs = get_smiles(cmol)
-                clique_set.add(cs)
-                if cs not in mol_to_clique[i]:
-                    mol_to_clique[i][cs] = 1
-                else:
-                    mol_to_clique[i][cs] += 1
+        if self.config['vocab'] == 'mgssl':
+            for i, m in enumerate(smiles_data):
+                mol_to_clique[i] = {}
+                mol = clique.get_mol(m)
+                cliques, edges = clique.brics_decomp(mol)
+                if len(edges) <= 1:
+                    cliques, edges = clique.tree_decomp(mol)
+                for c in cliques:
+                    cmol = clique.get_clique_mol(mol, c)
+                    cs = clique.get_smiles(cmol)
+                    clique_set.add(cs)
+                    if cs not in mol_to_clique[i]:
+                        mol_to_clique[i][cs] = 1
+                    else:
+                        mol_to_clique[i][cs] += 1
+        elif self.config['vocab'] == 'junction':
+            for i, m in enumerate(smiles_data):
+                mol_to_clique[i] = {}
+                mol = vocab.get_mol(m)
+                cliques, edges = vocab.tree_decomp(mol)
+                for c in cliques:
+                    cmol = vocab.get_clique_mol(mol, c)
+                    cs = vocab.get_smiles(cmol)
+                    clique_set.add(cs)
+                    if cs not in mol_to_clique[i]:
+                        mol_to_clique[i][cs] = 1
+                    else:
+                        mol_to_clique[i][cs] += 1
         return list(clique_set), mol_to_clique
 
     def _filter_cliques(self, threshold, train_loader, clique_list, mol_to_clique, clique_to_mol):
@@ -204,18 +220,20 @@ class FineTune(object):
         for mol in mol_to_clique:
             for clique in mol_to_clique[mol].keys():
                 if clique in fil_clique_list:
+                    if self.config['init'] == 'uniform':
+                        tmol_to_clique[mol]['EMP'] = 1
                     del tmol_to_clique[mol][clique]
         
         mol_to_clique = deepcopy(tmol_to_clique)
         emp_mol = []
         for mol in tmol_to_clique:
-            mol_to_clique[mol]['EMP0'] = 1
-            mol_to_clique[mol]['EMP1'] = 1
-            #if all(clique in fil_clique_list for clique in tmol_to_clique[mol]):
-            #    mol_to_clique[mol]['EMP0'] = 1
-            #    mol_to_clique[mol]['EMP1'] = 1
-            if len(tmol_to_clique[mol]) == 0:
-                emp_mol.append(mol)
+            if self.config['init'] == 'uniform':
+                if all('EMP' in clique for clique in tmol_to_clique[mol].keys()):
+                    emp_mol.append(mol)
+            elif self.config['init'] == 'zeros':
+                if len(tmol_to_clique[mol]) == 0:
+                    mol_to_clique[mol]['EMP'] = 1
+                    emp_mol.append(mol)
 
         clique_list = list(set(clique_list) - set(fil_clique_list))
         return emp_mol, clique_list, mol_to_clique
@@ -259,7 +277,7 @@ class FineTune(object):
         clique_list, mol_to_clique = self._gen_cliques(smiles_data)
         clique_to_mol = _gen_clique_to_mol(clique_list, mol_to_clique)
         emp_mol, clique_list, mol_to_clique = self._filter_cliques(self.config['threshold'], train_loader, clique_list, mol_to_clique, clique_to_mol)
-        num_motifs = len(clique_list) + 2
+        num_motifs = len(clique_list) + 1
         #num_motifs = len(clique_list)
 
         clique_dataset = MolCliqueDatasetWrapper(clique_list, self.config['batch_size'], self.config['dataset']['num_workers'])
@@ -296,31 +314,26 @@ class FineTune(object):
                     
             #    motif_feats = torch.stack(motif_feats)
 
-            model.eval()
+            with torch.no_grad():
 
-            motif_feats = []
-            for c in clique_loader:
-                c = c.to(self.device)
-                __, emb = model(c)
-                motif_feats.append(emb)
+                motif_feats = []
+                for c in clique_loader:
+                    c = c.to(self.device)
+                    __, emb = model(c)
+                    motif_feats.append(emb)
             
-            with torch.no_grad():               
                 motif_feats = torch.cat(motif_feats)
 
-            clique_list.append("EMP0")
-            clique_list.append("EMP1")
+                clique_list.append("EMP")
 
-            label_feats = []
-            #motif_label_feats = []
-            labels = []
-            for d in train_loader:
-                d = d.to(self.device)
-                feat_emb, out_emb = model(d)
-                label_feats.append(out_emb)
-                #motif_label_feats.append(feat_emb)
-                labels.append(d.y)
+                label_feats = []
+                labels = []
+                for d in train_loader:
+                    d = d.to(self.device)
+                    feat_emb, out_emb = model(d)
+                    label_feats.append(out_emb)
+                    labels.append(d.y)
 
-            with torch.no_grad():
                 label_feats = torch.cat(label_feats)
                 labels = torch.cat(labels)
 
@@ -329,28 +342,58 @@ class FineTune(object):
 
                 label_feats = torch.vstack((linit0, linit1)).to(self.device)
 
-                #motif_label_feats = torch.cat(motif_label_feats)
-                
-                #mlinit0 = torch.mean(motif_label_feats[torch.nonzero(labels == 0)[:, 0]], dim=0)
-                #mlinit1 = torch.mean(motif_label_feats[torch.nonzero(labels == 0)[:, 0]], dim=0)
+                dummy_motif = torch.zeros((1, motif_feats.shape[1])).to(self.device)
+                if self.config['init'] == 'uniform':
+                    nn.init.xavier_uniform_(dummy_motif)
+                motif_feats = torch.cat((motif_feats, dummy_motif), dim=0)
 
-                #motif_label_feats = torch.vstack((mlinit0, mlinit1)).to(self.device)
-
-                #motif_feats = torch.cat((motif_feats, motif_label_feats), dim=0)
-
-                motif_feats = torch.cat((motif_feats, label_feats), dim=0)
-
-            model.train()
-            
             from models.ginet_finetune_mp_link import GINet
             model = GINet(num_motifs, self.config['dataset']['task'], **self.config["model"]).to(self.device)
             model = self._load_pre_trained_weights(model)
             model.init_clique_emb(motif_feats)
             model.init_label_emb(label_feats)
         elif self.config['model_type'] == 'gcn':
-            from models.gcn_finetune import GCN
-            model = GCN(self.config['dataset']['task'], **self.config["model"]).to(self.device)
+            from models.gcn_molclr import GCN
+            model = GCN(feat_dim = self.config['model']['feat_dim']).to(self.device)
             model = self._load_pre_trained_weights(model)
+
+            with torch.no_grad():
+                motif_feats = []
+                for c in clique_loader:
+                    c = c.to(self.device)
+                    __, emb = model(c)
+                    motif_feats.append(emb)
+
+                motif_feats = torch.cat(motif_feats)
+
+                clique_list.append('EMP')
+
+                label_feats = []
+                labels = []
+                for d in train_loader:
+                    d = d.to(self.device)
+                    feat_emb, out_emb = model(d)
+                    label_feats.append(out_emb)
+                    labels.append(d.y)
+
+                label_feats = torch.cat(label_feats)
+                labels = torch.cat(labels)
+
+                linit0 = torch.mean(label_feats[torch.nonzero(labels == 0)[:, 0]], dim=0)
+                linit1 = torch.mean(label_feats[torch.nonzero(labels == 1)[:, 0]], dim=0)
+
+                label_feats = torch.vstack((linit0, linit1)).to(self.device)
+
+                dummy_motif = torch.zeros((1, motif_feats.shape[1])).to(self.device)
+                if self.config['init'] == 'uniform':
+                    nn.init.xavier_uniform_(dummy_motif)
+                motif_feats = torch.cat((motif_feats, dummy_motif), dim=0)
+
+            from models.gcn_finetune_mp_link import GCN
+            model = GCN(num_motifs, self.config['dataset']['task'], **self.config['model']).to(self.device)
+            model = self._load_pre_trained_weights(model)
+            model.init_clique_emb(motif_feats)
+            model.init_label_emb(label_feats)
 
         layer_list = []
         for name, param in model.named_parameters():

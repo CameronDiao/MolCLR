@@ -13,6 +13,8 @@ import torch
 
 use_ln = [False, True]
 activations = ['relu', 'softplus']
+init = ['uniform', 'zeros']
+vocab = ['mgssl', 'junction']
 
 hp_space = {'threshold': hp.quniform('threshold', 0, 100, 10), 
             'enc_dropout': hp.quniform('enc_dropout', 0.0, 0.5, 0.1),
@@ -20,9 +22,9 @@ hp_space = {'threshold': hp.quniform('threshold', 0, 100, 10),
             'dec_dropout': hp.quniform('dec_dropout', 0.0, 0.5, 0.1),
             'enc_ln': hp.choice('enc_ln', use_ln), 
             'tfm_ln': hp.choice('tfm_ln', use_ln),
-            'conc_ln': hp.choice('conc_ln', use_ln),
-            'n_heads': hp.quniform('n_heads', 2, 4, 2),
-            'ortho_weight': hp.quniform('ortho_weight', 0, 5e-5, 5e-6)}
+            'ortho_weight': hp.quniform('ortho_weight', 0, 5e-5, 2.5e-6),
+            'init': hp.choice('init', init),
+            'vocab': hp.choice('vocab', vocab)}
 
 config = yaml.load(open("hp_config.yaml", "r"), Loader=yaml.FullLoader)
 
@@ -34,9 +36,11 @@ def objective(params):
     config['model']['dec_dropout'] = float(params['dec_dropout'])
     config['model']['enc_ln'] = use_ln[int(params['enc_ln'])]
     config['model']['tfm_ln'] = use_ln[int(params['tfm_ln'])]
-    config['model']['conc_ln'] = use_ln[int(params['conc_ln'])]
-    config['model']['n_heads'] = int(params['n_heads'])
+    #config['model']['conc_ln'] = use_ln[int(params['conc_ln'])]
+    #config['model']['n_heads'] = int(params['n_heads'])
     config['ortho_weight'] = float(params['ortho_weight'])
+    config['init'] = str(params['init'])
+    config['vocab'] = str(params['vocab'])
 
     print(config)
 
@@ -132,14 +136,14 @@ def objective(params):
     else:
         raise ValueError('Undefined downstream task!')
 
-    random.seed(42)
-    np.random.seed(42)
+    #random.seed(42)
+    #np.random.seed(42)
     torch.manual_seed(42)
-    torch.cuda.manual_seed(42)
+    #torch.cuda.manual_seed(42)
 
     res = []
 
-    for __ in range(2):
+    for __ in range(5):
         for target in target_list:
             torch.cuda.empty_cache()
             config['dataset']['target'] = target
