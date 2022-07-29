@@ -166,7 +166,7 @@ class FineTune(object):
         __, pred = model(data, mol_idx, clique_idx)
         if self.config['dataset']['task'] == 'classification':
             loss = self.criterion(pred, data.y.flatten())
-            loss += self.config['ortho_weight'] * _ortho_constraint(self.device, model.get_label_emb())
+            loss += float(self.config['ortho_weight']) * _ortho_constraint(self.device, model.get_label_emb())
         elif self.config['dataset']['task'] == 'regression':
             if self.normalizer:
                 loss = self.criterion(pred, self.normalizer.norm(data.y))
@@ -489,6 +489,8 @@ class FineTune(object):
         print("Test ROC-AUC: ", self.roc_auc)
         self.roc_auc = sum(ret_val) / len(ret_val)
         print("Average validation ROC-AUC: ", self.roc_auc)
+        #self.roc_auc = best_valid_cls
+        #print("Best validation ROC-AUC: ", self.roc_auc)
 
     def _load_pre_trained_weights(self, model):
         try:
@@ -721,7 +723,8 @@ if __name__ == "__main__":
 
     print(config)
 
-    for run in range(10):
+    for run in range(5):
+        torch.cuda.empty_cache()
         results_list = []
         for target in target_list:
             config['dataset']['target'] = target

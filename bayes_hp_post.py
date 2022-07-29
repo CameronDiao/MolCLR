@@ -22,9 +22,8 @@ hp_space = {'threshold': hp.quniform('threshold', 0, 100, 10),
             'dec_dropout': hp.quniform('dec_dropout', 0.0, 0.5, 0.1),
             'enc_ln': hp.choice('enc_ln', use_ln), 
             'tfm_ln': hp.choice('tfm_ln', use_ln),
-            'ortho_weight': hp.quniform('ortho_weight', 0, 5e-5, 2.5e-6),
-            'init': hp.choice('init', init),
-            'vocab': hp.choice('vocab', vocab)}
+            'conc_ln': hp.choice('conc_ln', use_ln),
+            'ortho_weight': hp.quniform('ortho_weight', 0, 1e-4, 2.5e-6)}
 
 config = yaml.load(open("hp_config.yaml", "r"), Loader=yaml.FullLoader)
 
@@ -36,11 +35,11 @@ def objective(params):
     config['model']['dec_dropout'] = float(params['dec_dropout'])
     config['model']['enc_ln'] = use_ln[int(params['enc_ln'])]
     config['model']['tfm_ln'] = use_ln[int(params['tfm_ln'])]
-    #config['model']['conc_ln'] = use_ln[int(params['conc_ln'])]
+    config['model']['conc_ln'] = use_ln[int(params['conc_ln'])]
     #config['model']['n_heads'] = int(params['n_heads'])
     config['ortho_weight'] = float(params['ortho_weight'])
-    config['init'] = str(params['init'])
-    config['vocab'] = str(params['vocab'])
+    #config['init'] = str(params['init'])
+    #config['vocab'] = str(params['vocab'])
 
     print(config)
 
@@ -143,7 +142,7 @@ def objective(params):
 
     res = []
 
-    for __ in range(5):
+    for __ in range(3):
         for target in target_list:
             torch.cuda.empty_cache()
             config['dataset']['target'] = target

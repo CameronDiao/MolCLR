@@ -9,9 +9,9 @@ init_lr: 0.0005
 init_base_lr: 0.0005
 weight_decay: 2e-6
 ortho_weight: 0.00001
-init: uniform
+init: zeros
 vocab: mgssl
-gpu: cuda:1                     # training GPU
+gpu: cuda:0                     # training GPU
 task_name: BACE                 # name of fine-tuning benchmark, inlcuding
                                 # classifications: BBBP/BACE/ClinTox/Tox21/HIV/SIDER/MUV
                                 # regressions: FreeSolv/ESOL/Lipo/qm7/qm8/qm9
@@ -30,7 +30,7 @@ model:
   n_heads: 4
   pool: mean                    # readout pooling (i.e., mean/max/add)
   pred_act: softplus
-  pred_n_layer: 2
+  pred_n_layer: 1
 
 dataset:
   num_workers: 4                # dataloader number of workers
