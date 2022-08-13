@@ -459,31 +459,32 @@ class GINet(nn.Module):
 
         self.pred_n_layer = max(1, pred_n_layer)
 
-        if pred_act == 'relu':
-            pred_head = [
-                nn.Linear(self.feat_dim, self.feat_dim//2), 
-                nn.ReLU(inplace=True)
-            ]
-            for _ in range(self.pred_n_layer - 1):
-                pred_head.extend([
-                    nn.Linear(self.feat_dim//2, self.feat_dim//2), 
-                    nn.ReLU(inplace=True),
-                ])
-        elif pred_act == 'softplus':
-            pred_head = [
-                nn.Linear(self.feat_dim, self.feat_dim//2), 
-                nn.Softplus(),
-            ]
-            for _ in range(self.pred_n_layer - 1):
-                pred_head.extend([
-                    nn.Linear(self.feat_dim//2, self.feat_dim//2),
-                    nn.Softplus(),
-                ])
-        else:
-            raise ValueError('Undefined activation function')
+        #if pred_act == 'relu':
+        #    pred_head = [
+        #        nn.Linear(self.feat_dim, self.feat_dim//2), 
+        #        nn.ReLU(inplace=True)
+        #    ]
+        #    for _ in range(self.pred_n_layer - 1):
+        #        pred_head.extend([
+        #            nn.Linear(self.feat_dim//2, self.feat_dim//2), 
+        #            nn.ReLU(inplace=True),
+        #        ])
+        #elif pred_act == 'softplus':
+        #    pred_head = [
+        #        nn.Linear(self.feat_dim, self.feat_dim//2), 
+        #        nn.Softplus(),
+        #    ]
+        #    for _ in range(self.pred_n_layer - 1):
+        #        pred_head.extend([
+        #            nn.Linear(self.feat_dim//2, self.feat_dim//2),
+        #            nn.Softplus(),
+        #        ])
+        #else:
+        #    raise ValueError('Undefined activation function')
  
-        #pred_head.append(nn.Linear(self.feat_dim//2, out_dim))
-        self.pred_head = nn.Sequential(*pred_head)
+        ##pred_head.append(nn.Linear(self.feat_dim//2, out_dim))
+        #self.pred_head = nn.Sequential(*pred_head)
+        self.pred_head = nn.Linear(self.feat_dim, self.feat_dim//2)
 
         #self.prompt = nn.Linear(self.feat_dim//2, out_dim, bias=False)
         self.prompt_w = nn.Parameter(torch.Tensor(out_dim, self.feat_dim//2))
