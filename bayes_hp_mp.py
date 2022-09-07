@@ -1,4 +1,4 @@
-from hp_finetune_pre import FineTune
+from finetune_mp import FineTune
 from dataset.dataset_test import MolTestDatasetWrapper
 
 import pickle
@@ -13,31 +13,31 @@ import torch
 
 use_ln = [False, True]
 activations = ['relu', 'softplus']
-batch_sizes = [32, 128, 256]
-init_lr = [5e-4, 1e-3]
-init_base_lr = [5e-5, 1e-4, 2e-4, 5e-4]
-weight_decay = [5e-7, 1e-6, 2e-6, 5e-6]
-dropout = [0, 0.1, 0.3, 0.5]
+init = ['uniform', 'zeros']
+vocab = ['mgssl', 'junction']
 
-hp_space = {'batch_size': hp.choice('batch_size', batch_sizes), 
-            'init_lr': hp.choice('init_lr', init_lr),    
-            'init_base_lr': hp.choice('init_base_lr', init_base_lr),
-            'weight_decay': hp.choice('weight_decay', weight_decay),
-            'dropout': hp.choice('dropout', dropout),
-            'pred_n_layer': hp.quniform('pred_n_layer', 1, 2, 1),
-            'pred_act': hp.choice('pred_act', activations)} 
+hp_space = {'threshold': hp.quniform('threshold', 0, 100, 10), 
+            'enc_dropout': hp.quniform('enc_dropout', 0.0, 0.5, 0.1),
+            'tfm_dropout': hp.quniform('tfm_dropout', 0.0, 0.5, 0.1),
+            'dec_dropout': hp.quniform('dec_dropout', 0.0, 0.5, 0.1),
+            'enc_ln': hp.choice('enc_ln', use_ln), 
+            'tfm_ln': hp.choice('tfm_ln', use_ln),
+            'conc_ln': hp.choice('conc_ln', use_ln)}
 
 config = yaml.load(open("hp_config.yaml", "r"), Loader=yaml.FullLoader)
 
 
 def objective(params):
-    config['batch_size'] = int(params['batch_size'])
-    config['init_lr'] = float(params['init_lr'])
-    config['init_base_lr'] = float(params['init_base_lr'])
-    config['weight_decay'] = str(params['weight_decay'])
-    config['model']['drop_ratio'] = float(params['dropout'])
-    config['model']['pred_n_layer'] = int(params['pred_n_layer'])
-    config['model']['pred_act'] = str(params['pred_act'])
+    config['threshold'] = int(params['threshold'])
+    config['model']['enc_dropout'] = float(params['enc_dropout'])
+    config['model']['tfm_dropout'] = float(params['tfm_dropout'])
+    config['model']['dec_dropout'] = float(params['dec_dropout'])
+    config['model']['enc_ln'] = use_ln[int(params['enc_ln'])]
+    config['model']['tfm_ln'] = use_ln[int(params['tfm_ln'])]
+    config['model']['conc_ln'] = use_ln[int(params['conc_ln'])]
+    #config['model']['n_heads'] = int(params['n_heads'])
+    #config['init'] = str(params['init'])
+    #config['vocab'] = str(params['vocab'])
 
     print(config)
 
@@ -140,7 +140,7 @@ def objective(params):
 
     res = []
 
-    for __ in range(1):
+    for __ in range(3):
         for target in target_list:
             torch.cuda.empty_cache()
             config['dataset']['target'] = target

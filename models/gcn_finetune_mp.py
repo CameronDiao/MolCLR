@@ -241,12 +241,6 @@ class GCN(nn.Module):
         
         self.feat_lin = nn.Linear(self.emb_dim, self.feat_dim)
 
-        self.out_lin = nn.Sequential(
-                nn.Linear(self.feat_dim, self.feat_dim),
-                nn.ReLU(inplace=True),
-                nn.Linear(self.feat_dim, self.feat_dim//2)
-        )
-
         if self.task == 'classification':
             out_dim = 2
         elif self.task == 'regression':
@@ -277,43 +271,31 @@ class GCN(nn.Module):
 
         self.pred_n_layer = max(1, pred_n_layer)
 
-        #if pred_act == 'relu':
-        #    pred_head = [
-        #            nn.Linear(self.feat_dim, self.feat_dim//2),
-        #            nn.ReLU(inplace=True)
-        #    ]
-        #    for _ in range(self.pred_n_layer - 1):
-        #        pred_head.extend([
-        #            nn.Linear(self.feat_dim//2, self.feat_dim//2),
-        #            nn.ReLU(inplace=True)
-        #        ])
-        #elif pred_act == 'softplus':
-        #    pred_head = [
-        #            nn.Linear(self.feat_dim, self.feat_dim//2),
-        #            nn.Softplus()
-        #    ]
-        #    for _ in range(self.pred_n_layer - 1):
-        #        pred_head.extend([
-        #            nn.Linear(self.feat_dim//2, self.feat_dim//2),
-        #            nn.Softplus()
-        #        ])
-        #else:
-        #    raise ValueError('Undefined activation function')
+        if pred_act == 'relu':
+            pred_head = [
+                    nn.Linear(2 * self.feat_dim, self.feat_dim//2),
+                    nn.ReLU(inplace=True)
+            ]
+            for _ in range(self.pred_n_layer - 1):
+                pred_head.extend([
+                    nn.Linear(self.feat_dim//2, self.feat_dim//2),
+                    nn.ReLU(inplace=True)
+                ])
+        elif pred_act == 'softplus':
+            pred_head = [
+                    nn.Linear(2 * self.feat_dim, self.feat_dim//2),
+                    nn.Softplus()
+            ]
+            for _ in range(self.pred_n_layer - 1):
+                pred_head.extend([
+                    nn.Linear(self.feat_dim//2, self.feat_dim//2),
+                    nn.Softplus()
+                ])
+        else:
+            raise ValueError('Undefined activation function')
         
-        #pred_head.append(nn.Linear(self.feat_dim//2, out_dim))
-        #self.pred_head = nn.Sequential(*pred_head)
-        self.pred_head = nn.Linear(self.feat_dim * 2, self.feat_dim)
-
-        self.prompt_w = nn.Parameter(torch.Tensor(out_dim, self.feat_dim//2))
-
-    def init_label_emb(self, init):
-        with torch.no_grad():
-            self.prompt_w.data.copy_(init)
-
-    def get_label_emb(self):
-        for name, param in self.named_parameters():
-            if 'prompt_w' in name:
-                return param
+        pred_head.append(nn.Linear(self.feat_dim//2, out_dim))
+        self.pred_head = nn.Sequential(*pred_head)
 
     def init_clique_emb(self, init):
         with torch.no_grad():
@@ -336,7 +318,6 @@ class GCN(nn.Module):
 
         h = self.pool(h, data.batch)
         h = self.feat_lin(h)
-        #h = self.out_lin(h)
 
         hp = self.clique_embedding(clique_idx)
         batch, mask = to_dense_batch(hp, mol_idx)
@@ -357,10 +338,7 @@ class GCN(nn.Module):
             hp = F.normalize(hp, dim=1)
 
         hp = self.pred_head(hp)
-        hp = self.out_lin(hp)
 
-        pw = F.normalize(self.prompt_w, dim=1)
-        hp = F.linear(hp, pw)
         return h, hp
 
     def load_my_state_dict(self, state_dict):

@@ -438,20 +438,16 @@ if __name__ == "__main__":
     else:
         raise ValueError('Undefined downstream task!')
 
-    #random.seed(42)
-    #np.random.seed(42)
-    torch.manual_seed(42)
-    #torch.cuda.manual_seed(42)
-
     print(config)
 
-    results_list = []
-    for target in target_list:
-        torch.cuda.empty_cache()
-        print(target)
-        config['dataset']['target'] = target
-        result = main(config)
-        results_list.append([target, result])
+    for run in range(5):
+        results_list = []
+        for target in target_list:
+            torch.cuda.empty_cache()
+            print(target)
+            config['dataset']['target'] = target
+            result = main(config)
+            results_list.append([target, result])
 
     os.makedirs('experiments', exist_ok=True)
     df = pd.DataFrame(results_list)

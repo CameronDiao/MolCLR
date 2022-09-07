@@ -88,28 +88,6 @@ def _get_training_molecules(train_loader):
             train_mol.append(d.mol_index.item())
     return train_mol
 
-def _ortho_constraint(device, prompt):
-    return torch.norm(torch.mm(prompt, prompt.T) - torch.eye(prompt.shape[0]).to(device))
-
-#def _ortho_constraint(device, prompt):
-#    p = prompt.detach().clone()
-#    cols = prompt.shape[1]
-#    rows = prompt.shape[0]
-#    w1 = p.view(-1, cols)
-#    wt = torch.transpose(w1, 0, 1)
-#    m = torch.matmul(wt, w1)
-#    identity = torch.eye(cols, device=device)
-#
-#    w_tmp = (m - identity)
-#    height = w_tmp.size(0)
-#    u = F.normalize(w_tmp.new_empty(height).normal_(0,1), dim=0, eps=1e-12)
-#    v = F.normalize(torch.matmul(w_tmp.T, u), dim=0, eps=1e-12)
-#    u = F.normalize(torch.matmul(w_tmp, v), dim=0, eps=1e-12)
-#    sigma = torch.dot(u, torch.matmul(w_tmp, v))
-#
-#    return (torch.norm(sigma, 2))**2
-
-
 class Normalizer(object):
     """Normalize a Tensor and restore it later. """
 
@@ -166,7 +144,6 @@ class FineTune(object):
         __, pred = model(data, mol_idx, clique_idx)
         if self.config['dataset']['task'] == 'classification':
             loss = self.criterion(pred, data.y.flatten())
-            loss += float(self.config['ortho_weight']) * _ortho_constraint(self.device, model.get_label_emb())
         elif self.config['dataset']['task'] == 'regression':
             if self.normalizer:
                 loss = self.criterion(pred, self.normalizer.norm(data.y))
@@ -326,32 +303,15 @@ class FineTune(object):
 
                 clique_list.append("EMP")
 
-                label_feats = []
-                labels = []
-                for d in train_loader:
-                    d = d.to(self.device)
-                    feat_emb, out_emb = model(d)
-                    label_feats.append(out_emb)
-                    labels.append(d.y)
-
-                label_feats = torch.cat(label_feats)
-                labels = torch.cat(labels)
-
-                linit0 = torch.mean(label_feats[torch.nonzero(labels == 0)[:, 0]], dim=0)
-                linit1 = torch.mean(label_feats[torch.nonzero(labels == 1)[:, 0]], dim=0)
-
-                label_feats = torch.vstack((linit0, linit1)).to(self.device)
-
                 dummy_motif = torch.zeros((1, motif_feats.shape[1])).to(self.device)
                 if self.config['init'] == 'uniform':
                     nn.init.xavier_uniform_(dummy_motif)
                 motif_feats = torch.cat((motif_feats, dummy_motif), dim=0)
 
-            from models.ginet_finetune_mp_link import GINet
+            from models.ginet_finetune_mp import GINet
             model = GINet(num_motifs, self.config['dataset']['task'], **self.config["model"]).to(self.device)
             model = self._load_pre_trained_weights(model)
             model.init_clique_emb(motif_feats)
-            model.init_label_emb(label_feats)
         elif self.config['model_type'] == 'gcn':
             from models.gcn_molclr import GCN
             model = GCN(feat_dim = self.config['model']['feat_dim']).to(self.device)
@@ -368,37 +328,20 @@ class FineTune(object):
 
                 clique_list.append('EMP')
 
-                label_feats = []
-                labels = []
-                for d in train_loader:
-                    d = d.to(self.device)
-                    feat_emb, out_emb = model(d)
-                    label_feats.append(out_emb)
-                    labels.append(d.y)
-
-                label_feats = torch.cat(label_feats)
-                labels = torch.cat(labels)
-
-                linit0 = torch.mean(label_feats[torch.nonzero(labels == 0)[:, 0]], dim=0)
-                linit1 = torch.mean(label_feats[torch.nonzero(labels == 1)[:, 0]], dim=0)
-
-                label_feats = torch.vstack((linit0, linit1)).to(self.device)
-
                 dummy_motif = torch.zeros((1, motif_feats.shape[1])).to(self.device)
                 if self.config['init'] == 'uniform':
                     nn.init.xavier_uniform_(dummy_motif)
                 motif_feats = torch.cat((motif_feats, dummy_motif), dim=0)
 
-            from models.gcn_finetune_mp_link import GCN
+            from models.gcn_finetune_mp import GCN
             model = GCN(num_motifs, self.config['dataset']['task'], **self.config['model']).to(self.device)
             model = self._load_pre_trained_weights(model)
             model.init_clique_emb(motif_feats)
-            model.init_label_emb(label_feats)
 
         layer_list = []
         for name, param in model.named_parameters():
             #if 'motif' in name or 'conc' in name or 'pred' in name or 'prompt' in name:
-            if 'clique' in name or 'motif' in name or 'conc' in name or 'pred' in name or 'out_lin' in name or 'prompt' in name:    
+            if 'clique' in name or 'motif' in name or 'conc' in name or 'pred' in name:    
                 layer_list.append(name)
 
         params = list(map(lambda x: x[1],list(filter(lambda kv: kv[0] in layer_list, model.named_parameters()))))
