@@ -88,6 +88,10 @@ def _get_training_molecules(train_loader):
             train_mol.append(d.mol_index.item())
     return train_mol
 
+
+def _ortho_constraint(device, prompt):
+    return torch.norm(torch.mm(prompt, prompt.T) - torch.eye(prompt.shape[0]).to(device))
+
 class Normalizer(object):
     """Normalize a Tensor and restore it later. """
 
@@ -183,6 +187,21 @@ class FineTune(object):
                         mol_to_clique[i][cs] = 1
                     else:
                         mol_to_clique[i][cs] += 1
+        elif self.config['vocab'] == 'brics':
+            for i, m in enumerate(smiles_data):
+                mol_to_clique[i] = {}
+                mol = vocab.get_mol(m)
+                cliques, edges = clique.simple_brics_decomp(mol)
+                for c in cliques:
+                    cmol = clique.get_clique_mol(mol, c)
+                    cs = clique.get_smiles(cmol)
+                    clique_set.add(cs)
+                    if cs not in mol_to_clique[i]:
+                        mol_to_clique[i][cs] = 1
+                    else:
+                        mol_to_clique[i][cs] += 1
+
+        
         return list(clique_set), mol_to_clique
 
     def _filter_cliques(self, threshold, train_loader, clique_list, mol_to_clique, clique_to_mol):
@@ -248,8 +267,31 @@ class FineTune(object):
         return mol_idx, clique_idx
 
     def train(self):
-        smiles_data, train_loader, valid_loader, test_loader = self.dataset.get_data_loaders()
+        smiles_data, __, train_loader, valid_loader, test_loader = self.dataset.get_data_loaders()
         #full_data_loader = self.dataset.get_full_data_loader()
+
+        labels = []
+        for d in train_loader:
+            labels.append(d.y)
+        labels = torch.cat(labels)
+        if len(torch.unique(labels)) < 2:
+            self.roc_auc = 0.
+            return
+        labels = []
+        for d in valid_loader:
+            labels.append(d.y)
+        labels = torch.cat(labels)
+        if len(torch.unique(labels)) < 2:
+            self.roc_auc = 0.
+            return
+        labels = []
+        for d in test_loader:
+            labels.append(d.y)
+        labels = torch.cat(labels)
+        if len(torch.unique(labels)) < 2:
+            self.roc_auc = 0.
+            return
+
 
         clique_list, mol_to_clique = self._gen_cliques(smiles_data)
         clique_to_mol = _gen_clique_to_mol(clique_list, mol_to_clique)
@@ -306,7 +348,10 @@ class FineTune(object):
                 dummy_motif = torch.zeros((1, motif_feats.shape[1])).to(self.device)
                 if self.config['init'] == 'uniform':
                     nn.init.xavier_uniform_(dummy_motif)
+                
                 motif_feats = torch.cat((motif_feats, dummy_motif), dim=0)
+
+                #nn.init.xavier_uniform_(motif_feats)
 
             from models.ginet_finetune_mp import GINet
             model = GINet(num_motifs, self.config['dataset']['task'], **self.config["model"]).to(self.device)
@@ -318,6 +363,18 @@ class FineTune(object):
             model = self._load_pre_trained_weights(model)
 
             with torch.no_grad():
+                #mol_to_feats = {}
+                #for data in full_data_loader:
+                #    data = data.to(self.device)
+                #    emb, __ = model(data)
+                #    for i, d in enumerate(data.to_data_list()):
+                #        mol_to_feats[d.mol_index.item()] = emb[i, :]
+                #motif_feats = []
+                #for i in range(len(clique_list)):
+                #    mfeats = [mol_to_feats[mol] for mol in clique_to_mol[i]]
+                #    motif_feats.append(torch.mean(torch.stack(mfeats), dim=0))
+
+                #motif_feats = torch.stack(motif_feats)
                 motif_feats = []
                 for c in clique_loader:
                     c = c.to(self.device)
@@ -340,8 +397,8 @@ class FineTune(object):
 
         layer_list = []
         for name, param in model.named_parameters():
-            #if 'motif' in name or 'conc' in name or 'pred' in name or 'prompt' in name:
-            if 'clique' in name or 'motif' in name or 'conc' in name or 'pred' in name:    
+            if 'clique' in name or 'motif' in name or 'conc' in name:
+            #if 'clique' in name or 'motif' in name or 'conc' in name or 'pred' in name:    
                 layer_list.append(name)
 
         params = list(map(lambda x: x[1],list(filter(lambda kv: kv[0] in layer_list, model.named_parameters()))))
@@ -354,11 +411,15 @@ class FineTune(object):
         #                                   init_func=motif_initializer)
         #print("motif embedding is in ", motif_embed.emb_tensor.device)
 
-        optimizer = torch.optim.Adam(
-                [{'params': base_params, 'lr': self.config['init_base_lr']}, {'params': params}],
-                self.config['init_lr'], weight_decay=eval(self.config['weight_decay'])
-        )
+        #optimizer = torch.optim.Adam(
+        #        [{'params': base_params, 'lr': self.config['init_base_lr']}, {'params': params}],
+        #        self.config['init_lr'], weight_decay=eval(self.config['weight_decay'])
+        #)
         #motif_optimizer = dgl.optim.SparseAdam(params=[motif_embed], lr=self.config['init_lr'])
+
+        optimizer = torch.optim.Adam(
+                filter(lambda p: p.requires_grad, model.parameters()), lr=self.config['init_lr'], weight_decay = self.config['weight_decay']
+        )
 
         if apex_support and self.config['fp16_precision']:
             model, optimizer = amp.initialize(
@@ -405,6 +466,7 @@ class FineTune(object):
                 
                 n_iter += 1
 
+            #print('training loss: ', loss.detach().item())
             #_plot_grad_flow(model.named_parameters(), epoch_counter)
             # validate the model if requested
             if epoch_counter % self.config['eval_every_n_epochs'] == 0:
@@ -429,11 +491,11 @@ class FineTune(object):
                 valid_n_iter += 1
 
         self._test(model, test_loader, clique_list, mol_to_clique)
-        print("Test ROC-AUC: ", self.roc_auc)
+        print(self.roc_auc)
         self.roc_auc = sum(ret_val) / len(ret_val)
-        print("Average validation ROC-AUC: ", self.roc_auc)
-        #self.roc_auc = best_valid_cls
-        #print("Best validation ROC-AUC: ", self.roc_auc)
+        # print("Average validation ROC-AUC: ", self.roc_auc)
+        # self.roc_auc = best_valid_cls
+        # print("Best validation ROC-AUC: ", self.roc_auc)
 
     def _load_pre_trained_weights(self, model):
         try:
@@ -555,7 +617,7 @@ class FineTune(object):
 
 def main(config, run):
     #torch.manual_seed(42)
-    dataset = MolTestDatasetWrapper(config['batch_size'], **config['dataset'])
+    dataset = MolTestDatasetWrapper(config['batch_size'], config['task_name'], **config['dataset'])
 
     fine_tune = FineTune(dataset, config)
     fine_tune.train()
@@ -673,6 +735,8 @@ if __name__ == "__main__":
             config['dataset']['target'] = target
             result = main(config, run)
             results_list.append([target, result])
+
+        print('Average ROC-AUC: ', sum(int(res) for target, res in results_list)/ len(results_list))
 
         print(results_list)
     #os.makedirs('experiments', exist_ok=True)

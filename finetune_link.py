@@ -2,6 +2,7 @@ import os
 import shutil
 import sys
 import yaml
+import random
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -13,12 +14,10 @@ from matplotlib.lines import Line2D
 import torch
 from torch import nn
 import torch.nn.functional as F
-#from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from sklearn.metrics import roc_auc_score, mean_squared_error, mean_absolute_error
-
-import dgl
 
 from dataset.dataset_test import MolTestDatasetWrapper
 from dataset.dataset_clique import MolCliqueDatasetWrapper
@@ -26,6 +25,7 @@ from dataset.dataset_clique import MolCliqueDatasetWrapper
 from utils import clique
 from utils import vocab
 
+from utils.nt_xent import NTXentLoss
 
 apex_support = False
 try:
@@ -42,37 +42,6 @@ def _save_config_file(model_checkpoints_folder):
     if not os.path.exists(model_checkpoints_folder):
         os.makedirs(model_checkpoints_folder)
         shutil.copy('./config_finetune.yaml', os.path.join(model_checkpoints_folder, 'config_finetune.yaml'))
-
-def _plot_grad_flow(named_parameters, epoch):
-    '''Plots the gradients flowing through different layers in the net during training.
-    Can be used for checking for possible gradient vanishing / exploding problems.
-    
-    Usage: Plug this function in Trainer class after loss.backwards() as 
-    "plot_grad_flow(self.model.named_parameters())" to visualize the gradient flow'''
-    ave_grads = []
-    max_grads= []
-    layers = []
-    for n, p in named_parameters:
-        if (p.requires_grad) and ("bias" not in n):
-            n_label = n.replace('self.', '').replace('.weight', '')
-            layers.append(n_label)
-            ave_grads.append(p.grad.abs().mean().cpu())
-            max_grads.append(p.grad.abs().max().cpu())
-    plt.bar(np.arange(len(max_grads)), max_grads, alpha=0.1, lw=1, color="c")
-    plt.bar(np.arange(len(max_grads)), ave_grads, alpha=0.1, lw=1, color="b")
-    plt.hlines(0, 0, len(ave_grads)+1, lw=2, color="k" )
-    plt.xticks(range(0,len(ave_grads), 1), layers, rotation="vertical")
-    plt.xlim(left=0, right=len(ave_grads))
-    plt.ylim(bottom = -0.001, top=0.02) # zoom in on the lower gradient regions
-    plt.xlabel("Layers")
-    plt.ylabel("Average gradient")
-    plt.title("Gradient flow")
-    plt.grid(True)
-    plt.legend([Line2D([0], [0], color="c", lw=4),
-                Line2D([0], [0], color="b", lw=4),
-                Line2D([0], [0], color="k", lw=4)], ['max-gradient', 'mean-gradient', 'zero-gradient'],
-                loc='upper right')
-    plt.savefig('plots/grad_flow_{}.png'.format(epoch), bbox_inches="tight")
 
 def _ortho_constraint(device, prompt):
     return torch.norm(torch.mm(prompt, prompt.T) - torch.eye(prompt.shape[0]).to(device))
@@ -125,17 +94,12 @@ class FineTune(object):
         self.device = self._get_device()
 
         current_time = datetime.now().strftime('%b%d_%H-%M-%S')
-        dir_name = current_time + '_' + config['task_name'] + '_' + config['dataset']['target']
-        log_dir = os.path.join('finetune', dir_name)
-        self.writer = SummaryWriter(log_dir=log_dir)
+        dir_name = current_time + '_' + config['task_name']
+        self.log_dir = os.path.join('finetune', dir_name)
+
         self.dataset = dataset
         if config['dataset']['task'] == 'classification':
-            self.criterion = nn.CrossEntropyLoss()
-        elif config['dataset']['task'] == 'regression':
-            if self.config["task_name"] in ['qm7', 'qm8', 'qm9']:
-                self.criterion = nn.L1Loss()
-            else:
-                self.criterion = nn.MSELoss()
+            self.criterion = NTXentLoss(self.device, config['batch_size'], **config['loss'])
 
     def _get_device(self):
         if torch.cuda.is_available() and self.config['gpu'] != 'cpu':
@@ -147,26 +111,77 @@ class FineTune(object):
 
         return device
 
-    def _step(self, model, data, n_iter, epoch=float('inf')):   
+    def _step(self, model, data, n_iter, cluster_idx, epoch=float('inf')):   
         # get the prediction
-        __, pred = model(data)
+        preds, embs = model(data, cluster_idx)
+
         if self.config['dataset']['task'] == 'classification':
-            loss = self.criterion(pred, data.y.flatten())
+            # normalize projection feature vectors
+            preds = F.normalize(preds, dim=1)
+            embs = F.normalize(embs, dim=1)
+
+            loss = self.criterion(preds, embs)
             loss += float(self.config['ortho_weight']) * _ortho_constraint(self.device, model.get_label_emb())
-        elif self.config['dataset']['task'] == 'regression':
-            if self.normalizer:
-                loss = self.criterion(pred, self.normalizer.norm(data.y))
-            else:
-                loss = self.criterion(pred, data.y)
 
         return loss
 
+    def _extract_clusters(self, batch, mol_to_cluster):
+        cluster_idx = []
+        for d in batch.to_data_list():
+            if d.y.item() == 0:
+                idx = mol_to_cluster[d.mol_index.item()]
+            elif d.y.item() == 1:
+                idx = self.config['num_clusters'] + mol_to_cluster[d.mol_index.item()]
+            cluster_idx.append(idx)
+
+        cluster_idx = torch.tensor(cluster_idx).to(self.device)
+        
+        return cluster_idx
+
+    def _gen_clusters(self):
+        full_data_loader = self.dataset.get_full_data_loader()
+        mol_to_cluster = {}
+        cluster_idx_0 = 0
+        cluster_idx_1 = 0
+        for batch in full_data_loader:
+            for d in batch.to_data_list():
+                if d.y.item() == 0:
+                    mol_to_cluster[d.mol_index.item()] = cluster_idx_0
+                    cluster_idx_0 = (cluster_idx_0 + 1) % self.config['num_clusters']
+                elif d.y.item() == 1:
+                    mol_to_cluster[d.mol_index.item()] = cluster_idx_1
+                    cluster_idx_1 = (cluster_idx_1 + 1) % self.config['num_clusters']
+        return mol_to_cluster
+
     def train(self):
-        smiles_data, train_loader, valid_loader, test_loader = self.dataset.get_data_loaders()
-        #full_data_loader = self.dataset.get_full_data_loader()
+        smiles_data, dropped_train_loader, train_loader, valid_loader, test_loader = self.dataset.get_data_loaders()
+
+        if self.config['task_name'] == 'MUV':
+            labels = []
+            for d in train_loader:
+                labels.append(d.y)
+            labels = torch.cat(labels)
+            if len(torch.unique(labels)) < 2:
+                self.roc_auc = 1.
+                return
+            labels = []
+            for d in valid_loader:
+                labels.append(d.y)
+            labels = torch.cat(labels)
+            if len(torch.unique(labels)) < 2:
+                self.roc_auc = 1.
+                return
+            labels = []
+            for d in test_loader:
+                labels.append(d.y)
+            labels = torch.cat(labels)
+            if len(torch.unique(labels)) < 2:
+                self.roc_auc = 1.
+                return
+
+        mol_to_cluster = self._gen_clusters()
 
         self.normalizer = None
-      
         if self.config["task_name"] in ['qm7', 'qm9']:
             labels = []
             for d, __ in train_loader:
@@ -184,11 +199,12 @@ class FineTune(object):
             with torch.no_grad():
                 label_feats = []
                 labels = []
-                for d in train_loader:
-                    d = d.to(self.device)
-                    feat_emb, out_emb = model(d)
+                
+                for batch in train_loader:
+                    batch = batch.to(self.device)
+                    feat_emb, out_emb = model(batch)
                     label_feats.append(out_emb)
-                    labels.append(d.y)
+                    labels.append(batch.y)
 
                 label_feats = torch.cat(label_feats)
                 labels = torch.cat(labels)
@@ -198,8 +214,13 @@ class FineTune(object):
 
                 label_feats = torch.vstack((linit0, linit1)).to(self.device)
 
+                cluster_indices = [0 for i in range(self.config['num_clusters'])]
+                cluster_indices.extend([1 for i in range(self.config['num_clusters'])])
+
+                label_feats = torch.index_select(label_feats, 0, torch.tensor(cluster_indices).to(self.device))
+
             from models.ginet_finetune_link import GINet
-            model = GINet(self.config['dataset']['task'], **self.config["model"]).to(self.device)
+            model = GINet(self.config['dataset']['task'], self.config['cluster_mode'], self.config['num_clusters'], **self.config["model"]).to(self.device)
             model = self._load_pre_trained_weights(model)
             model.init_label_emb(label_feats)
         elif self.config['model_type'] == 'gcn':
@@ -231,7 +252,7 @@ class FineTune(object):
 
         layer_list = []
         for name, param in model.named_parameters():
-            if 'out_lin' in name or 'pred' in name or 'prompt' in name:    
+            if 'out_lin' in name or 'prompt' in name:
                 layer_list.append(name)
 
         params = list(map(lambda x: x[1],list(filter(lambda kv: kv[0] in layer_list, model.named_parameters()))))
@@ -239,18 +260,16 @@ class FineTune(object):
 
         optimizer = torch.optim.Adam(
                 [{'params': base_params, 'lr': self.config['init_base_lr']}, {'params': params}],
-                self.config['init_lr'], weight_decay=eval(self.config['weight_decay'])
+                self.config['init_lr'], weight_decay=self.config['weight_decay']
         )
+
+        model_checkpoints_folder = os.path.join(self.log_dir, 'checkpoints')
+        os.makedirs(model_checkpoints_folder, exist_ok=True)
 
         if apex_support and self.config['fp16_precision']:
             model, optimizer = amp.initialize(
                 model, optimizer, opt_level='O2', keep_batchnorm_fp32=True
             )
-
-        model_checkpoints_folder = os.path.join(self.writer.log_dir, 'checkpoints')
-
-        # save config file
-        _save_config_file(model_checkpoints_folder)
 
         n_iter = 0
         valid_n_iter = 0
@@ -259,18 +278,15 @@ class FineTune(object):
         best_valid_cls = 0
 
         ret_val = []
-
         for epoch_counter in range(self.config['epochs']):
-            for bn, data in enumerate(train_loader):
-                data = data.to(self.device)
-            
+            for bn, data in enumerate(dropped_train_loader):
                 optimizer.zero_grad()
 
-                loss = self._step(model, data, n_iter, epoch=epoch_counter)
+                data = data.to(self.device)
 
-                #if n_iter % self.config['log_every_n_steps'] == 0:
-                #    self.writer.add_scalar('train_loss', loss, global_step=n_iter)
-                #    print(epoch_counter, bn, loss.detach().item())
+                cluster_idx = self._extract_clusters(data, mol_to_cluster)
+
+                loss = self._step(model, data, n_iter, cluster_idx, epoch=epoch_counter)
 
                 if apex_support and self.config['fp16_precision']:
                     with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -279,33 +295,24 @@ class FineTune(object):
                     loss.backward()
 
                 optimizer.step()
-                
                 n_iter += 1
 
             # validate the model if requested
             if epoch_counter % self.config['eval_every_n_epochs'] == 0:
                 if self.config['dataset']['task'] == 'classification': 
-                    valid_loss, valid_cls = self._validate(model, valid_loader) 
+                    valid_cls = self._validate(model, valid_loader, mol_to_cluster) 
                     ret_val.append(valid_cls)
                     if valid_cls > best_valid_cls:
                         # save the model weights
                         best_valid_cls = valid_cls
                         torch.save(model.state_dict(), os.path.join(model_checkpoints_folder, 'model.pth'))
-                elif self.config['dataset']['task'] == 'regression': 
-                    valid_loss, valid_rgr = self._validate(model, valid_loader)
-                    ret_val.append(valid_rgr)
-                    if valid_rgr < best_valid_rgr:
-                        # save the model weights
-                        best_valid_rgr = valid_rgr
-                        torch.save(model.state_dict(), os.path.join(model_checkpoints_folder, 'model.pth'))
 
-                #self.writer.add_scalar('validation_loss', valid_loss, global_step=valid_n_iter)
                 valid_n_iter += 1
 
-        self._test(model, test_loader)
-        print("Test ROC-AUC: ", self.roc_auc)
+        self._test(model, test_loader, mol_to_cluster)
+        print("Test ROC-AUC: {}".format(self.roc_auc))
         self.roc_auc = sum(ret_val) / len(ret_val)
-        print("Average validation ROC-AUC: ", self.roc_auc)
+        # print("Average validation ROC-AUC: ", self.roc_auc)
         #self.roc_auc = best_valid_cls
         #print("Best validation ROC-AUC: ", self.roc_auc)
 
@@ -321,25 +328,51 @@ class FineTune(object):
 
         return model
 
-    def _validate(self, model, valid_loader):
+    def _validate(self, model, valid_loader, mol_to_cluster):
         predictions = []
         labels = []
         with torch.no_grad():
             model.eval()
 
-            valid_loss = 0.0
             num_data = 0
             for bn, data in enumerate(valid_loader):
                 data = data.to(self.device)
 
-                __, pred = model(data)
-                loss = self._step(model, data, bn)
+                cluster_idx = self._extract_clusters(data, mol_to_cluster)
 
-                valid_loss += loss.detach().item() * data.y.size(0)
-                num_data += data.y.size(0)
+                preds, __ = model(data, cluster_idx)
 
-                if self.normalizer:
-                    pred = self.normalizer.denorm(pred)
+                if self.config['dataset']['task'] == 'classification':
+                    if self.config['cluster_mode'] == 'fixed_assign':
+                        preds = F.normalize(preds, dim=1)
+                        embs = model.get_label_emb()
+                        embs = F.normalize(embs, dim=1)
+
+                        new_cluster_idx = cluster_idx.clone()
+                        new_cluster_idx[new_cluster_idx > self.config['num_clusters'] - 1] -= self.config['num_clusters']
+
+                        pred = torch.empty((data.num_graphs, 2)).to(self.device)
+                        for i in range(self.config['num_clusters']):
+                            num_i = torch.count_nonzero(new_cluster_idx == i).item()
+                            if num_i > 0:
+                                new_preds = preds[new_cluster_idx == i, :]
+                                new_embs = torch.cat((embs[i].unsqueeze(0), embs[self.config['num_clusters']].unsqueeze(0)), dim=0)
+                                similarities = torch.mm(new_preds, new_embs.T)
+                                pred[new_cluster_idx == i, :] = F.softmax(similarities, dim=-1)
+                    else:
+                        preds = F.normalize(preds, dim=1)
+                        embs = model.get_label_emb()
+                        embs = F.normalize(embs, dim=1)
+                        emb_0 = torch.index_select(embs, 0, torch.tensor([i for i in range(self.config['num_clusters'])]).to(self.device))
+                        emb_0 = emb_0.mean(dim=0, keepdim=True)
+                        emb_0 = F.normalize(emb_0, dim=1)
+                        emb_1 = torch.index_select(embs, 0, torch.tensor([self.config['num_clusters'] + i for i in range(self.config['num_clusters'])]).to(self.device))
+                        emb_1 = emb_1.mean(dim=0, keepdim=True)
+                        emb_1 = F.normalize(emb_1, dim=1)
+                        embs = torch.cat((emb_0, emb_1), dim=0)
+
+                        similarities = torch.mm(preds, embs.T)
+                        pred= F.softmax(similarities, dim=-1)
 
                 if self.device == 'cpu':
                     predictions.extend(pred.detach().numpy())
@@ -348,31 +381,17 @@ class FineTune(object):
                     predictions.extend(pred.cpu().detach().numpy())
                     labels.extend(data.y.cpu().flatten().numpy())
 
-            valid_loss /= num_data
         
         model.train()
 
-        if self.config['dataset']['task'] == 'regression':
+        if self.config['dataset']['task'] == 'classification': 
             predictions = np.array(predictions)
             labels = np.array(labels)
-            if self.config['task_name'] in ['qm7', 'qm8', 'qm9']:
-                mae = mean_absolute_error(labels, predictions)
-                #print('Validation loss:', valid_loss, 'MAE:', mae)
-                return valid_loss, mae
-            else:
-                rmse = mean_squared_error(labels, predictions, squared=False)
-                #print('Validation loss:', valid_loss, 'RMSE:', rmse)
-                return valid_loss, rmse
+            roc_auc = roc_auc_score(labels, predictions[:, 1])
+            return roc_auc
 
-        elif self.config['dataset']['task'] == 'classification': 
-            predictions = np.array(predictions)
-            labels = np.array(labels)
-            roc_auc = roc_auc_score(labels, predictions[:,1])
-            #print('Validation loss:', valid_loss, 'ROC AUC:', roc_auc)
-            return valid_loss, roc_auc
-
-    def _test(self, model, valid_loader):
-        model_path = os.path.join(self.writer.log_dir, 'checkpoints', 'model.pth')
+    def _test(self, model, valid_loader, mol_to_cluster):
+        model_path = os.path.join(self.log_dir, 'checkpoints', 'model.pth')
         state_dict = torch.load(model_path, map_location=self.device)
         model.load_state_dict(state_dict)
         #print("Loaded trained model with success.")
@@ -383,19 +402,45 @@ class FineTune(object):
         with torch.no_grad():
             model.eval()
 
-            test_loss = 0.0
             num_data = 0
             for bn, data in enumerate(valid_loader):
                 data = data.to(self.device)
 
-                __, pred = model(data)
-                loss = self._step(model, data, bn)
+                cluster_idx = self._extract_clusters(data, mol_to_cluster)
 
-                test_loss += loss.detach().item() * data.y.size(0)
-                num_data += data.y.size(0)
+                preds, __ = model(data, cluster_idx)
 
-                if self.normalizer:
-                    pred = self.normalizer.denorm(pred)
+                if self.config['dataset']['task'] == 'classification':
+                    if self.config['cluster_mode'] == 'fixed_assign':
+                        preds = F.normalize(preds, dim=1)
+                        embs = model.get_label_emb()
+                        embs = F.normalize(embs, dim=1)
+
+                        new_cluster_idx = cluster_idx.clone()
+                        new_cluster_idx[new_cluster_idx > self.config['num_clusters'] - 1] -= self.config['num_clusters']
+
+                        pred = torch.empty((data.num_graphs, 2)).to(self.device)
+                        for i in range(self.config['num_clusters']):
+                            num_i = torch.count_nonzero(new_cluster_idx == i).item()
+                            if num_i > 0:
+                                new_preds = preds[new_cluster_idx == i, :]
+                                new_embs = torch.cat((embs[i].unsqueeze(0), embs[self.config['num_clusters']].unsqueeze(0)), dim=0)
+                                similarities = torch.mm(new_preds, new_embs.T)
+                                pred[new_cluster_idx == i, :] = F.softmax(similarities, dim=-1)
+                    else:
+                        preds = F.normalize(preds, dim=1)
+                        embs = model.get_label_emb()
+                        embs = F.normalize(embs, dim=1)
+                        emb_0 = torch.index_select(embs, 0, torch.tensor([i for i in range(self.config['num_clusters'])]).to(self.device))
+                        emb_0 = emb_0.mean(dim=0, keepdim=True)
+                        emb_0 = F.normalize(emb_0, dim=1)
+                        emb_1 = torch.index_select(embs, 0, torch.tensor([self.config['num_clusters'] + i for i in range(self.config['num_clusters'])]).to(self.device))
+                        emb_1 = emb_1.mean(dim=0, keepdim=True)
+                        emb_1 = F.normalize(emb_1, dim=1)
+                        embs = torch.cat((emb_0, emb_1), dim=0)
+
+                        similarities = torch.mm(preds, embs.T)
+                        pred= F.softmax(similarities, dim=-1)
 
                 if self.device == 'cpu':
                     predictions.extend(pred.detach().numpy())
@@ -403,28 +448,15 @@ class FineTune(object):
                 else:
                     predictions.extend(pred.cpu().detach().numpy())
                     labels.extend(data.y.cpu().flatten().numpy())
-
-            test_loss /= num_data
         
         model.train()
 
-        if self.config['dataset']['task'] == 'regression':
+        if self.config['dataset']['task'] == 'classification': 
             predictions = np.array(predictions)
             labels = np.array(labels)
-            if self.config['task_name'] in ['qm7', 'qm8', 'qm9']:
-                self.mae = mean_absolute_error(labels, predictions)
-                #print('Test loss:', test_loss, 'Test MAE:', self.mae)
-            else:
-                self.rmse = mean_squared_error(labels, predictions, squared=False)
-                #print('Test loss:', test_loss, 'Test RMSE:', self.rmse)
+            self.roc_auc = roc_auc_score(labels, predictions[:, 1])
 
-        elif self.config['dataset']['task'] == 'classification': 
-            predictions = np.array(predictions)
-            labels = np.array(labels)
-            self.roc_auc = roc_auc_score(labels, predictions[:,1])
-
-def main(config, run):
-    #torch.manual_seed(42)
+def main(config):
     dataset = MolTestDatasetWrapper(config['batch_size'], **config['dataset'])
 
     fine_tune = FineTune(dataset, config)
@@ -536,18 +568,7 @@ if __name__ == "__main__":
 
     print(config)
 
-    for run in range(5):
-        torch.cuda.empty_cache()
-        results_list = []
+    for _ in range(5):
         for target in target_list:
             config['dataset']['target'] = target
-            result = main(config, run)
-            results_list.append([target, result])
-
-        print(results_list)
-    #os.makedirs('experiments', exist_ok=True)
-    #df = pd.DataFrame(results_list)
-    #df.to_csv(
-    #    'experiments/{}_{}_finetune.csv'.format(config['fine_tune_from'], config['task_name']), 
-    #    mode='a', index=False, header=False
-    #)
+            result = main(config)

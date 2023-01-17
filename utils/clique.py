@@ -15,6 +15,49 @@ from rdkit.Chem.EnumerateStereoisomers import EnumerateStereoisomers, StereoEnum
 MST_MAX_WEIGHT = 100
 MAX_NCAND = 2000
 
+def simple_brics_decomp(mol):
+    n_atoms = mol.GetNumAtoms()
+    if n_atoms == 1:
+        return [[0]], []
+
+    cliques = []
+    breaks = []
+    for bond in mol.GetBonds():
+        a1 = bond.GetBeginAtom().GetIdx()
+        a2 = bond.GetEndAtom().GetIdx()
+        cliques.append([a1, a2])
+
+    res = list(BRICS.FindBRICSBonds(mol))
+    if len(res) == 0:
+        return [list(range(n_atoms))], []
+    else:
+        for bond in res:
+            if [bond[0][0], bond[0][1]] in cliques:
+                cliques.remove([bond[0][0], bond[0][1]])
+            else:
+                cliques.remove([bond[0][1], bond[0][0]])
+            cliques.append([bond[0][0]])
+            cliques.append([bond[0][1]])
+
+    # edges
+    edges = []
+    for bond in res:
+        for c in range(len(cliques)):
+            if bond[0][0] in cliques[c]:
+                c1 = c
+            if bond[0][1] in cliques[c]:
+                c2 = c
+        edges.append((c1, c2))
+    for bond in breaks:
+        for c in range(len(cliques)):
+            if bond[0] in cliques[c]:
+                c1 = c
+            if bond[1] in cliques[c]:
+                c2 = c
+        edges.append((c1, c2))
+
+    return cliques, edges
+
 
 def brics_decomp(mol):
     n_atoms = mol.GetNumAtoms()

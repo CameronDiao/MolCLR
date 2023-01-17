@@ -11,13 +11,17 @@ from hyperopt.early_stop import no_progress_loss
 import random
 import torch
 
-hp_space = {'ortho_weight': hp.quniform('ortho_weight', 0, 1e-4, 2.5e-6)}
+cluster_mode = ['fixed_assign', 'fixed_ensemble', 'random_ensemble']
+
+hp_space = {'ortho_weight': hp.quniform('ortho_weight', 0., 1e-4, 2.5e-6),
+            'num_clusters': hp.quniform('num_clusters', 1, 100, 2)}
 
 config = yaml.load(open("hp_config.yaml", "r"), Loader=yaml.FullLoader)
 
 
 def objective(params):
     config['ortho_weight'] = float(params['ortho_weight'])
+    config['num_clusters'] = int(params['num_clusters'])
 
     print(config)
 
@@ -113,16 +117,10 @@ def objective(params):
     else:
         raise ValueError('Undefined downstream task!')
 
-    #random.seed(42)
-    #np.random.seed(42)
-    torch.manual_seed(42)
-    #torch.cuda.manual_seed(42)
-
     res = []
 
     for __ in range(1):
         for target in target_list:
-            torch.cuda.empty_cache()
             config['dataset']['target'] = target
             dataset = MolTestDatasetWrapper(config['batch_size'], **config['dataset'])
 

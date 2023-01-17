@@ -60,11 +60,13 @@ class GINet(nn.Module):
         node representations
     """
     def __init__(self, 
-        task='classification', num_layer=5, emb_dim=300, feat_dim=512, 
-        drop_ratio=0, pool='mean', pred_n_layer=2, pred_act='softplus'
+        task='classification', cluster_mode='random_ensemble', num_clusters=1, num_layer=5, emb_dim=300, feat_dim=512, 
+        drop_ratio=0, pool='mean',
     ):
         super(GINet, self).__init__()
         self.num_layer = num_layer
+        self.num_clusters = num_clusters
+        self.cluster_mode = cluster_mode
         self.emb_dim = emb_dim
         self.feat_dim = feat_dim
         self.drop_ratio = drop_ratio
@@ -75,7 +77,7 @@ class GINet(nn.Module):
         nn.init.xavier_uniform_(self.x_embedding1.weight.data)
         nn.init.xavier_uniform_(self.x_embedding2.weight.data)
        
-        self.label_embedding = nn.Embedding(2, feat_dim)
+        self.label_embedding = nn.Embedding(2 * num_clusters, feat_dim)
 
         # List of MLPs
         self.gnns = nn.ModuleList()
@@ -95,44 +97,21 @@ class GINet(nn.Module):
             self.pool = global_add_pool
 
         self.feat_lin = nn.Linear(self.emb_dim, self.feat_dim)
-        out_dim = 1
-      
-        self.label_lin = nn.Linear(self.feat_dim, self.feat_dim)
-        nn.init.xavier_uniform_(self.label_lin.weight)
 
-        self.pred_n_layer = max(1, pred_n_layer)
-
-        if pred_act == 'relu':
-            pred_head = [
-                nn.Linear(2 * self.feat_dim, self.feat_dim//2), 
-                nn.ReLU(inplace=True)
-            ]
-            for _ in range(self.pred_n_layer - 1):
-                pred_head.extend([
-                    nn.Linear(self.feat_dim//2, self.feat_dim//2), 
-                    nn.ReLU(inplace=True),
-                ])
-        elif pred_act == 'softplus':
-            pred_head = [
-                nn.Linear(2 * self.feat_dim, self.feat_dim//2), 
-                nn.Softplus()
-            ]
-            for _ in range(self.pred_n_layer - 1):
-                pred_head.extend([
-                    nn.Linear(self.feat_dim//2, self.feat_dim//2), 
-                    nn.Softplus()
-                ])
-        else:
-            raise ValueError('Undefined activation function')
-        
-        pred_head.append(nn.Linear(self.feat_dim//2, out_dim))
-        self.pred_head = nn.Sequential(*pred_head)
+        self.out_lin = nn.Sequential(
+                nn.Linear(self.feat_dim, self.feat_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(self.feat_dim, self.feat_dim//2)
+        )
 
     def init_label_emb(self, init):
         with torch.no_grad():
             self.label_embedding.weight = nn.Parameter(init)
 
-    def forward(self, data, device):
+    def get_label_emb(self):
+        return self.label_embedding.weight
+
+    def forward(self, data, cluster_idx):
         x = data.x
         edge_index = data.edge_index
         edge_attr = data.edge_attr
@@ -149,17 +128,19 @@ class GINet(nn.Module):
 
         h = self.pool(h, data.batch)
         h = self.feat_lin(h)
-        h1 = torch.squeeze(self.label_embedding(torch.zeros(h.shape[0]).type(torch.LongTensor).to(device)))
-        h1 = self.label_lin(h1)
-        h2 = torch.squeeze(self.label_embedding(torch.ones(h.shape[0]).type(torch.LongTensor).to(device)))
-        h2 = self.label_lin(h2)
+        h = self.out_lin(h)
 
-        h1 = torch.cat((h, h1), dim=1)
-        h2 = torch.cat((h, h2), dim=1)
+        if 'fixed' in self.cluster_mode:
+            l = self.label_embedding(cluster_idx.to(torch.long))
+            return h, l
+        else:
+            y = data.y.clone().squeeze().to(torch.long)
+            y[y == 0] = torch.randint(0, self.num_clusters, y[y == 0].shape).cuda()
+            y[y == 1] = self.num_clusters + torch.randint(0, self.num_clusters, y[y == 1].shape).cuda()
 
-        p = torch.cat((self.pred_head(h1), self.pred_head(h2)), dim=1)
+            l = self.label_embedding(y)
 
-        return h, p
+        return h, l
 
     def load_my_state_dict(self, state_dict):
         own_state = self.state_dict()

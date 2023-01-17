@@ -193,8 +193,8 @@ class MolTestDatasetWrapper(object):
 
     def get_data_loaders(self):
         train_dataset = MolTestDataset(data_path=self.data_path, target=self.target, task=self.task)
-        train_loader, valid_loader, test_loader = self.get_train_validation_data_loaders(train_dataset)
-        return train_dataset.smiles_data, train_loader, valid_loader, test_loader
+        dropped_train_loader, train_loader, valid_loader, test_loader = self.get_train_validation_data_loaders(train_dataset)
+        return train_dataset.smiles_data, dropped_train_loader, train_loader, valid_loader, test_loader
 
     def get_train_validation_data_loaders(self, train_dataset):
         if self.splitting == 'random':
@@ -219,6 +219,10 @@ class MolTestDatasetWrapper(object):
             train_dataset, batch_size=self.batch_size, sampler=train_sampler,
             num_workers=self.num_workers, drop_last=False
         )
+        dropped_train_loader = DataLoader(
+            train_dataset, batch_size=self.batch_size, sampler=train_sampler,
+            num_workers=self.num_workers, drop_last=True
+        )
         valid_loader = DataLoader(
             train_dataset, batch_size=self.batch_size, sampler=valid_sampler,
             num_workers=self.num_workers, drop_last=False
@@ -228,4 +232,4 @@ class MolTestDatasetWrapper(object):
             num_workers=self.num_workers, drop_last=False
         )
 
-        return train_loader, valid_loader, test_loader
+        return dropped_train_loader, train_loader, valid_loader, test_loader

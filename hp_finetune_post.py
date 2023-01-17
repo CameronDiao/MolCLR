@@ -206,6 +206,21 @@ class FineTune(object):
                         mol_to_clique[i][cs] = 1
                     else:
                         mol_to_clique[i][cs] += 1
+        elif self.config['vocab'] == 'brics':
+            for i, m in enumerate(smiles_data):
+                mol_to_clique[i] = {}
+                mol = vocab.get_mol(m)
+                cliques, edges = clique.simple_brics_decomp(mol)
+                for c in cliques:
+                    cmol = clique.get_clique_mol(mol, c)
+                    cs = clique.get_smiles(cmol)
+                    clique_set.add(cs)
+                    if cs not in mol_to_clique[i]:
+                        mol_to_clique[i][cs] = 1
+                    else:
+                        mol_to_clique[i][cs] += 1
+
+
         return list(clique_set), mol_to_clique
 
     def _filter_cliques(self, threshold, train_loader, clique_list, mol_to_clique, clique_to_mol):
@@ -397,7 +412,7 @@ class FineTune(object):
 
         layer_list = []
         for name, param in model.named_parameters():
-            #if 'motif' in name or 'conc' in name or 'pred' in name or 'prompt' in name:
+            #if 'clique' in name or 'motif' in name or 'conc' in name or 'pred' in name:
             if 'clique' in name or 'motif' in name or 'conc' in name or 'pred' in name or 'out_lin' in name or 'prompt' in name:    
                 layer_list.append(name)
 
@@ -415,7 +430,12 @@ class FineTune(object):
                 [{'params': base_params, 'lr': self.config['init_base_lr']}, {'params': params}],
                 self.config['init_lr'], weight_decay=eval(self.config['weight_decay'])
         )
+
         #motif_optimizer = dgl.optim.SparseAdam(params=[motif_embed], lr=self.config['init_lr'])
+
+        #optimizer = torch.optim.Adam(
+        #        filter(lambda p: p.requires_grad, model.parameters()), lr=self.config['init_lr'], weight_decay=eval(self.config['weight_decay'])
+        #)
 
         if apex_support and self.config['fp16_precision']:
             model, optimizer = amp.initialize(
@@ -461,6 +481,8 @@ class FineTune(object):
                 #motif_optimizer.step()
                 
                 n_iter += 1
+
+            print('training loss: ', loss.detach().item())
 
             #_plot_grad_flow(model.named_parameters(), epoch_counter)
             # validate the model if requested
@@ -553,7 +575,7 @@ class FineTune(object):
             predictions = np.array(predictions)
             labels = np.array(labels)
             roc_auc = roc_auc_score(labels, predictions[:,1])
-            #print('Validation loss:', valid_loss, 'ROC AUC:', roc_auc)
+            print('Validation loss:', valid_loss, 'ROC AUC:', roc_auc)
             return valid_loss, roc_auc
 
     def _test(self, model, valid_loader, clique_list, mol_to_clique):

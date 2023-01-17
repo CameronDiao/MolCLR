@@ -20,14 +20,23 @@ num_chirality_tag = 3
 num_bond_type = 5 # including aromatic and self-loop edge
 num_bond_direction = 3 
 
+def _weight_reset(block):
+    try:
+        block.reset_parameters()
+    except:
+        if isinstance(block, nn.Sequential):
+            for layer in block:
+                if isinstance(layer, nn.Linear):
+                    layer.reset_parameters()
+
 class MAB(torch.nn.Module):
-    r"""Multihead-Attention Block."""
-    def __init__(self, dim_Q: int, dim_K: int, dim_V: int, num_heads: int,
+    def __init__(self, dim_Q: int, dim_K: int, dim_V: int, num_heads: int, dropout: float = 0.0,
                  Conv: Optional[Type]  = None, layer_norm: bool = False):
         super().__init__()
         self.dim_V = dim_V
         self.num_heads = num_heads
         self.layer_norm = layer_norm
+        self.dropout = dropout
 
         self.fc_q = Linear(dim_Q, dim_V)
 
@@ -43,55 +52,65 @@ class MAB(torch.nn.Module):
             self.ln1 = LayerNorm(dim_V)
 
         self.fc_o = Linear(dim_V, dim_V)
+        self.ffn = nn.Sequential(
+                nn.Linear(dim_V, dim_V),
+                nn.ReLU(inplace=True),
+                nn.Linear(dim_V, dim_V)
+        )
 
     def reset_parameters(self):
-        self.fc_q.reset_parameters()
-        self.layer_k.reset_parameters()
-        self.layer_v.reset_parameters()
+        _weight_reset(self.fc_q)
+        _weight_reset(self.layer_k)
+        _weight_reset(self.layer_v)
         if self.layer_norm:
-            self.ln0.reset_parameters()
-            self.ln1.reset_parameters()
-        self.fc_o.reset_parameters()
+            _weight_reset(self.ln0)
+            _weight_reset(self.ln1)
+        _weight_reset(self.fc_o)
+        _weight_reset(self.ffn)
         pass
 
     def forward(
-        self,
-        Q: Tensor,
-        K: Tensor,
-        graph: Optional[Tuple[Tensor, Tensor, Tensor]] = None,
-        mask: Optional[Tensor] = None,
+            self,
+            Q: Tensor,
+            K: Tensor,
+            graph: Optional[Tuple[Tensor, Tensor, Tensor]] = None,
+            mask: Optional[Tensor] = None,
     ) -> Tensor:
-
-        Q = self.fc_q(Q)
+        num_queries = Q.shape[1]
+        num_values = K.shape[1]
+        Qn = self.fc_q(Q)
 
         if graph is not None:
             x, edge_index, batch = graph
-            K, V = self.layer_k(x, edge_index), self.layer_v(x, edge_index)
-            K, _ = to_dense_batch(K, batch)
-            V, _ = to_dense_batch(V, batch)
+            Kn, Vn = self.layer_k(x, edge_index), self.layer_v(x, edge_index)
+            Kn, _ = to_dense_batch(Kn, batch)
+            Vn, _ = to_dense_batch(Vn, batch)
         else:
-            K, V = self.layer_k(K), self.layer_v(K)
+            Kn, Vn = self.layer_k(K), self.layer_v(K)
 
         dim_split = self.dim_V // self.num_heads
-        Q_ = torch.cat(Q.split(dim_split, 2), dim=0)
-        K_ = torch.cat(K.split(dim_split, 2), dim=0)
-        V_ = torch.cat(V.split(dim_split, 2), dim=0)
+        Q_ = torch.cat(Qn.split(dim_split, 2), dim=0)
+        K_ = torch.cat(Kn.split(dim_split, 2), dim=0)
+        V_ = torch.cat(Vn.split(dim_split, 2), dim=0)
 
         if mask is not None:
-            mask = torch.cat([mask for _ in range(self.num_heads)], 0)
+            mask = mask.repeat(self.num_heads, num_queries, 1)
+            max_neg_value = -torch.finfo(Q_.dtype).max
             attention_score = Q_.bmm(K_.transpose(1, 2))
             attention_score = attention_score / math.sqrt(self.dim_V)
-            A = torch.softmax(mask + attention_score, 1)
+            attention_score.masked_fill_(~mask, max_neg_value)
+            A = torch.softmax(attention_score, 1)
         else:
             A = torch.softmax(
-                Q_.bmm(K_.transpose(1, 2)) / math.sqrt(self.dim_V), 1)
+                    Q_.bmm(K_.transpose(1, 2)) / math.sqrt(self.dim_V), 1)
 
-        out = torch.cat((Q_ + A.bmm(V_)).split(Q.size(0), 0), 2)
+        out = torch.cat(A.bmm(V_).split(Q.size(0), 0), 2)
+        out = Q + F.dropout(self.fc_o(out), self.dropout, training=self.training)
 
         if self.layer_norm:
             out = self.ln0(out)
 
-        out = out + self.fc_o(out).relu()
+        out = out + F.dropout(self.ffn(out), self.dropout, training=self.training)
 
         if self.layer_norm:
             out = self.ln1(out)
@@ -313,15 +332,21 @@ class GINet(nn.Module):
     Output:
         node representations
     """
-    def __init__(self, 
-        task='classification', num_layer=5, emb_dim=300, feat_dim=512, 
-        drop_ratio=0, pool='mean', pred_n_layer=2, pred_act='softplus'
-    ):
+    def __init__(self, num_motifs, task='classification', num_layer=5, emb_dim=300, feat_dim=512, 
+            drop_ratio=0, enc_dropout = 0, tfm_dropout = 0, dec_dropout=0, 
+            enc_ln = True, tfm_ln = False, conc_ln = False,
+            pool='mean', pred_n_layer=2, n_heads = 4, pred_act='softplus'):
         super(GINet, self).__init__()
         self.num_layer = num_layer
         self.emb_dim = emb_dim
         self.feat_dim = feat_dim
         self.drop_ratio = drop_ratio
+        self.enc_dropout = enc_dropout
+        self.tfm_dropout = tfm_dropout
+        self.dec_dropout = dec_dropout
+        self.enc_ln = enc_ln
+        self.tfm_ln = tfm_ln
+        self.conc_ln = conc_ln
         self.task = task
 
         self.x_embedding1 = nn.Embedding(num_atom_type, emb_dim)
@@ -354,67 +379,45 @@ class GINet(nn.Module):
         elif self.task == 'regression':
             out_dim = 1
        
-        self.motif_norm = LayerNorm(self.feat_dim)
+        self.clique_embedding = nn.Embedding(num_motifs, self.feat_dim)
 
-        #self.motif_lin = nn.Linear(self.feat_dim, self.feat_dim)
-        #nn.init.xavier_uniform_(self.motif_lin.weight.data)
+        self.motif_pool = MAB(self.feat_dim, self.feat_dim, self.feat_dim, num_heads=n_heads, dropout=self.tfm_dropout,
+                layer_norm=self.tfm_ln)
+        self.motif_pool.reset_parameters()
 
-        #self.motif_pool = GlobalAttention(gate_nn=nn.Sequential(nn.Linear(self.feat_dim, 1)),
-        #                                  nn=nn.Sequential(nn.Linear(self.feat_dim, self.feat_dim//2)))
+        if self.enc_ln:
+            self.motif_norm1 = LayerNorm(self.feat_dim)
+            _weight_reset(self.motif_norm1)
 
-        #self.motif_pool = GraphMultisetTransformer(in_channels=self.feat_dim, hidden_channels=self.feat_dim,
-        #                                           out_channels=self.feat_dim, pool_sequences=["GMPool_I"])
-        
-        #self.motif_trans = SAB(in_channels=self.feat_dim, out_channels=self.feat_dim, num_heads=4)
-        self.motif_pool = PMA(channels=self.feat_dim, num_heads=4, num_seeds=1)
+        self.motif_enc = nn.Sequential(
+                nn.Linear(self.feat_dim, self.feat_dim)
+        )
+        _weight_reset(self.motif_enc)
+        self.motif_dec = nn.Sequential(
+                nn.Linear(self.feat_dim, self.feat_dim)
+        )
+        _weight_reset(self.motif_dec)
 
-        #self.out_lin = nn.Sequential(
-        #                   nn.Linear(self.feat_dim, self.feat_dim),
-        #                   nn.ReLU(inplace=True),
-        #                   nn.Linear(self.feat_dim, self.feat_dim//2)
-        #               )
+        if self.conc_ln:
+            self.conc_norm1 = LayerNorm(2 * self.feat_dim)
+            _weight_reset(self.conc_norm1)
 
-        self.prompt = nn.Linear(self.feat_dim//2, out_dim)
+        self.pred_head = nn.Linear(2 * self.feat_dim, out_dim)
 
-        #self.pred_n_layer = max(1, pred_n_layer)
-
-        #if pred_act == 'relu':
-        #    pred_head = [
-        #        nn.Linear(2 * self.feat_dim, self.feat_dim//2), 
-        #        nn.ReLU(inplace=True)
-        #    ]
-        #    for _ in range(self.pred_n_layer - 1):
-        #        pred_head.extend([
-        #            nn.Linear(self.feat_dim//2, self.feat_dim//2), 
-        #            nn.ReLU(inplace=True),
-        #        ])
-        #elif pred_act == 'softplus':
-        #    pred_head = [
-        #        nn.Linear(2 * self.feat_dim, self.feat_dim//2), 
-        #        nn.Softplus()
-        #    ]
-        #    for _ in range(self.pred_n_layer - 1):
-        #        pred_head.extend([
-        #            nn.Linear(self.feat_dim//2, self.feat_dim//2), 
-        #            nn.Softplus()
-        #        ])
-        #else:
-        #    raise ValueError('Undefined activation function')
-        
-        #pred_head.append(nn.Linear(self.feat_dim//2, out_dim))
-        #self.pred_head = nn.Sequential(*pred_head)
-
-    def init_prompt_embed(self, init):
+    def init_clique_emb(self, init):
         with torch.no_grad():
-            self.prompt.weight.copy_(init)
-    #def init_motif_emb(self, init):
-    #    with torch.no_grad():
-    #        self.motif_embedding.weight.data = nn.Parameter(init)
+            self.clique_embedding.weight.data.copy_(init)
+
+    def get_clique_emb(self):
+        for name, param in self.named_parameters():
+            if "clique_embedding" in name:
+                return param
     
-    def forward(self, data, mol_idx, motif_samples):
+    def forward(self, data, mol_idx, clique_idx):
         x = data.x
         edge_index = data.edge_index
         edge_attr = data.edge_attr
+
         h = self.x_embedding1(x[:,0]) + self.x_embedding2(x[:,1])
 
         for layer in range(self.num_layer):
@@ -428,19 +431,26 @@ class GINet(nn.Module):
         h = self.pool(h, data.batch)
         h = self.feat_lin(h)
 
-        hp = torch.cat((motif_samples, h), dim=0)
-        #hp = self.motif_lin(hp)
+        hp = self.clique_embedding(clique_idx)
         batch, mask = to_dense_batch(hp, mol_idx)
-        mask = (~mask).unsqueeze(1).to(dtype=hp.dtype) * -1e9
-        batch = self.motif_pool(self.motif_norm(batch), None, mask)
+        mask = mask.unsqueeze(1)
+        batch = self.motif_enc(batch)
+        if self.enc_ln:
+            batch = self.motif_norm1(batch)
+        batch = F.dropout(batch, self.enc_dropout, training=self.training)
+        batch = self.motif_pool(h.detach().unsqueeze(1), batch, None, mask)
+        batch = self.motif_dec(batch)
+        batch = F.dropout(batch, self.dec_dropout, training=self.training)
         hp = batch.squeeze(1)
-        #hp = self.motif_lin(hp)
-        
-        #hp = torch.cat((h, hp), dim=1)
-        #return h, self.pred_head(hp)
 
-        #hp = self.out_lin(hp)
-        hp = self.prompt(hp)
+        hp = torch.cat((h, hp), dim=1)
+        if self.conc_ln:
+            hp = self.conc_norm1(hp)
+        else:
+            hp = F.normalize(hp, dim=1)
+
+        hp = self.pred_head(hp)
+
         return h, hp
 
     def load_my_state_dict(self, state_dict):

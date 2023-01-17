@@ -301,6 +301,11 @@ class GCN(nn.Module):
         with torch.no_grad():
             self.clique_embedding.weight.data.copy_(init)
 
+    def get_clique_emb(self):
+        for name, param in self.named_parameters():
+            if "clique_embedding" in name:
+                return param
+
     def forward(self, data, mol_idx, clique_idx):
         x = data.x
         edge_index = data.edge_index

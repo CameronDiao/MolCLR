@@ -141,7 +141,7 @@ def objective(params):
 
     res = []
 
-    for __ in range(3):
+    for __ in range(1):
         for target in target_list:
             torch.cuda.empty_cache()
             config['dataset']['target'] = target

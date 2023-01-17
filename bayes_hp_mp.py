@@ -16,26 +16,20 @@ activations = ['relu', 'softplus']
 init = ['uniform', 'zeros']
 vocab = ['mgssl', 'junction']
 
-hp_space = {'threshold': hp.quniform('threshold', 0, 100, 10), 
-            'enc_dropout': hp.quniform('enc_dropout', 0.0, 0.5, 0.1),
-            'tfm_dropout': hp.quniform('tfm_dropout', 0.0, 0.5, 0.1),
-            'dec_dropout': hp.quniform('dec_dropout', 0.0, 0.5, 0.1),
-            'enc_ln': hp.choice('enc_ln', use_ln), 
-            'tfm_ln': hp.choice('tfm_ln', use_ln),
-            'conc_ln': hp.choice('conc_ln', use_ln)}
+hp_space = {'dropout': hp.quniform('dropout', 0.0, 0.5, 0.1),
+            'enc_ln': hp.choice('enc_ln', use_ln),
+            'n_heads': hp.quniform('n_heads', 1, 3, 1)}
 
 config = yaml.load(open("hp_config.yaml", "r"), Loader=yaml.FullLoader)
 
 
 def objective(params):
-    config['threshold'] = int(params['threshold'])
-    config['model']['enc_dropout'] = float(params['enc_dropout'])
-    config['model']['tfm_dropout'] = float(params['tfm_dropout'])
-    config['model']['dec_dropout'] = float(params['dec_dropout'])
+    # config['threshold'] = int(params['threshold'])
+    config['model']['enc_dropout'] = float(params['dropout'])
+    config['model']['tfm_dropout'] = float(params['dropout'])
+    config['model']['dec_dropout'] = float(params['dropout'])
     config['model']['enc_ln'] = use_ln[int(params['enc_ln'])]
-    config['model']['tfm_ln'] = use_ln[int(params['tfm_ln'])]
-    config['model']['conc_ln'] = use_ln[int(params['conc_ln'])]
-    #config['model']['n_heads'] = int(params['n_heads'])
+    config['model']['n_heads'] = int(2**int(params['n_heads']))
     #config['init'] = str(params['init'])
     #config['vocab'] = str(params['vocab'])
 
@@ -133,16 +127,10 @@ def objective(params):
     else:
         raise ValueError('Undefined downstream task!')
 
-    #random.seed(42)
-    #np.random.seed(42)
-    torch.manual_seed(42)
-    #torch.cuda.manual_seed(42)
-
     res = []
 
     for __ in range(3):
         for target in target_list:
-            torch.cuda.empty_cache()
             config['dataset']['target'] = target
             dataset = MolTestDatasetWrapper(config['batch_size'], **config['dataset'])
 
