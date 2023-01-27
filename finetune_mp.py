@@ -617,7 +617,7 @@ class FineTune(object):
 
 def main(config, run):
     #torch.manual_seed(42)
-    dataset = MolTestDatasetWrapper(config['batch_size'], config['task_name'], **config['dataset'])
+    dataset = MolTestDatasetWrapper(config['batch_size'], **config['dataset'])
 
     fine_tune = FineTune(dataset, config)
     fine_tune.train()
@@ -729,7 +729,6 @@ if __name__ == "__main__":
     print(config)
 
     for run in range(5):
-        torch.cuda.empty_cache()
         results_list = []
         for target in target_list:
             config['dataset']['target'] = target

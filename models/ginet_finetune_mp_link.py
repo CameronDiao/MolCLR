@@ -23,21 +23,6 @@ num_chirality_tag = 3
 num_bond_type = 5 # including aromatic and self-loop edge
 num_bond_direction = 3 
 
-def xavier_normal_small_init_(tensor, gain=1.):
-    # type: (Tensor, float) -> Tensor
-    fan_in, fan_out = _calculate_fan_in_and_fan_out(tensor)
-    std = gain * math.sqrt(2.0 / float(fan_in + 4*fan_out))
-
-    return _no_grad_normal_(tensor, 0., std)
-
-def xavier_uniform_small_init_(tensor, gain=1.):
-    # type: (Tensor, float) -> Tensor
-    fan_in, fan_out = _calculate_fan_in_and_fan_out(tensor)
-    std = gain * math.sqrt(2.0 / float(fan_in + 4*fan_out))
-    a = math.sqrt(3.0) * std  # Calculate uniform bounds from standard deviation
-
-    return _no_grad_uniform_(tensor, -a, a)
-
 def _weight_reset(block):
     try:
         block.reset_parameters()
@@ -313,17 +298,6 @@ class GraphMultisetTransformer(torch.nn.Module):
         return (f'{self.__class__.__name__}({self.in_channels}, '
                 f'{self.out_channels}, pool_sequences={self.pool_sequences})')
 
-class ScaleNorm(nn.Module):
-    """ScaleNorm"""
-    def __init__(self, scale, eps=1e-5):
-        super(ScaleNorm, self).__init__()
-        self.scale = nn.Parameter(torch.tensor(scale))
-        self.eps = eps
-
-    def forward(self, x):
-        norm = self.scale / torch.norm(x, dim=-1, keepdim=True).clamp(min=self.eps)
-        return x * norm
-
 class GINEConv(MessagePassing):
     def __init__(self, emb_dim):
         super(GINEConv, self).__init__()
@@ -371,13 +345,13 @@ class GINet(nn.Module):
         node representations
     """
     def __init__(self, 
-        num_motifs, task='classification', num_layer=5, emb_dim=300, feat_dim=512, 
-        drop_ratio=0, enc_dropout=0, tfm_dropout=0, dec_dropout=0,
-        enc_ln=True, tfm_ln=False, conc_ln=False, 
-        pool='mean', pred_n_layer=2, n_heads=4, pred_act='softplus'
+        num_motifs, task='classification', cluster_mode='random_ensemble', num_clusters=1, 
+        num_layer=5, emb_dim=300, feat_dim=512, drop_ratio=0, enc_dropout=0, tfm_dropout=0, dec_dropout=0,
+        enc_ln=True, tfm_ln=False, conc_ln=False, pool='mean', n_heads=4
     ):
         super(GINet, self).__init__()
         self.num_layer = num_layer
+        self.num_clusters = num_clusters
         self.emb_dim = emb_dim
         self.feat_dim = feat_dim
         self.drop_ratio = drop_ratio
@@ -393,6 +367,8 @@ class GINet(nn.Module):
         self.x_embedding2 = nn.Embedding(num_chirality_tag, emb_dim)
         nn.init.xavier_uniform_(self.x_embedding1.weight.data)
         nn.init.xavier_uniform_(self.x_embedding2.weight.data)
+
+        self.label_embedding = nn.Embedding(2 * num_clusters, feat_dim)
 
         # List of MLPs
         self.gnns = nn.ModuleList()
@@ -418,21 +394,8 @@ class GINet(nn.Module):
                            nn.ReLU(inplace=True),
                            nn.Linear(self.feat_dim, self.feat_dim//2)
                        )        
-
-        if self.task == 'classification':
-            out_dim = 2
-        elif self.task == 'regression':
-            out_dim = 1
       
         self.clique_embedding = nn.Embedding(num_motifs, self.feat_dim//2)
-
-        #self.motif_pool = GlobalAttention(gate_nn=nn.Sequential(nn.Linear(self.feat_dim//2, 1)))
-
-        #self.motif_pool = GraphMultisetTransformer(in_channels=self.feat_dim//2, hidden_channels=self.feat_dim,
-        #                                           out_channels=self.feat_dim//2, pool_sequences=["SelfAtt", "GMPool_I"])
-        
-        #self.motif_pool = PMA(channels=self.feat_dim//2, num_heads=4, num_seeds=1)
-        #self.motif_pool.reset_parameters()
 
         self.motif_pool = MAB(self.feat_dim//2, self.feat_dim//2, self.feat_dim//2, num_heads=n_heads, dropout=self.tfm_dropout,
                 layer_norm=self.tfm_ln)
@@ -454,57 +417,19 @@ class GINet(nn.Module):
         if self.conc_ln:
             self.conc_norm1 = LayerNorm(self.feat_dim) 
             _weight_reset(self.conc_norm1)
-        #self.conc_norm2 = LayerNorm(self.feat_dim//2)
-        #_weight_reset(self.conc_norm2)
-
-        self.pred_n_layer = max(1, pred_n_layer)
-
-        #if pred_act == 'relu':
-        #    pred_head = [
-        #        nn.Linear(self.feat_dim, self.feat_dim//2), 
-        #        nn.ReLU(inplace=True)
-        #    ]
-        #    for _ in range(self.pred_n_layer - 1):
-        #        pred_head.extend([
-        #            nn.Linear(self.feat_dim//2, self.feat_dim//2), 
-        #            nn.ReLU(inplace=True),
-        #        ])
-        #elif pred_act == 'softplus':
-        #    pred_head = [
-        #        nn.Linear(self.feat_dim, self.feat_dim//2), 
-        #        nn.Softplus(),
-        #    ]
-        #    for _ in range(self.pred_n_layer - 1):
-        #        pred_head.extend([
-        #            nn.Linear(self.feat_dim//2, self.feat_dim//2),
-        #            nn.Softplus(),
-        #        ])
-        #else:
-        #    raise ValueError('Undefined activation function')
- 
-        ##pred_head.append(nn.Linear(self.feat_dim//2, out_dim))
-        #self.pred_head = nn.Sequential(*pred_head)
-        self.pred_head = nn.Linear(self.feat_dim, self.feat_dim//2)
-
-        #self.prompt = nn.Linear(self.feat_dim//2, out_dim, bias=False)
-        self.prompt_w = nn.Parameter(torch.Tensor(out_dim, self.feat_dim//2))
-        #self.prompt_b = nn.Parameter(torch.Tensor(out_dim))
-        #nn.init.zeros_(self.prompt_b)
 
     def init_label_emb(self, init):
         with torch.no_grad():
-            self.prompt_w.data.copy_(init)
-
-    def get_label_emb(self):
-        for name, param in self.named_parameters():
-            if "prompt_w" in name:
-                return param
+            self.label_embedding.weight = nn.Parameter(init)
 
     def init_clique_emb(self, init):
         with torch.no_grad():
             self.clique_embedding.weight.data.copy_(init)
 
-    def forward(self, data, mol_idx, clique_idx):
+    def get_label_emb(self):
+        return self.label_embedding.weight
+
+    def forward(self, data, mol_idx, clique_idx, cluster_idx, device):
         x = data.x
         edge_index = data.edge_index
         edge_attr = data.edge_attr
@@ -541,12 +466,13 @@ class GINet(nn.Module):
         else:
             hp = F.normalize(hp, dim=1)
         
-        #hp = self.conc_norm1(h + hp)
-        hp = self.pred_head(hp)
-        #hp = self.conc_norm2(hp)
-        pw = F.normalize(self.prompt_w, dim=1)
-        hp = F.linear(hp, pw)
-        return h, hp 
+        y = data.y.clone().squeeze().to(torch.long)
+        y[y == 0] = torch.randint(0, self.num_clusters, y[y == 0].shape, device=device)
+        y[y == 1] = self.num_clusters + torch.randint(0, self.num_clusters, y[y == 1].shape, device=device)
+
+        l = self.label_embedding(y)
+
+        return hp, l
 
     def load_my_state_dict(self, state_dict):
         own_state = self.state_dict()

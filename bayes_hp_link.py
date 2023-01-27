@@ -119,7 +119,7 @@ def objective(params):
 
     res = []
 
-    for __ in range(1):
+    for __ in range(3):
         for target in target_list:
             config['dataset']['target'] = target
             dataset = MolTestDatasetWrapper(config['batch_size'], **config['dataset'])

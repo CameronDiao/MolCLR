@@ -334,8 +334,7 @@ class GINet(nn.Module):
     """
     def __init__(self, num_motifs, task='classification', num_layer=5, emb_dim=300, feat_dim=512, 
             drop_ratio=0, enc_dropout = 0, tfm_dropout = 0, dec_dropout=0, 
-            enc_ln = True, tfm_ln = False, conc_ln = False,
-            pool='mean', pred_n_layer=2, n_heads = 4, pred_act='softplus'):
+            enc_ln = True, tfm_ln = False, conc_ln = False, pool='mean', n_heads = 4):
         super(GINet, self).__init__()
         self.num_layer = num_layer
         self.emb_dim = emb_dim
@@ -401,8 +400,6 @@ class GINet(nn.Module):
         if self.conc_ln:
             self.conc_norm1 = LayerNorm(2 * self.feat_dim)
             _weight_reset(self.conc_norm1)
-
-        self.pred_head = nn.Linear(2 * self.feat_dim, out_dim)
 
     def init_clique_emb(self, init):
         with torch.no_grad():

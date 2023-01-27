@@ -2,7 +2,6 @@ import os
 import shutil
 import sys
 import yaml
-import random
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -14,10 +13,12 @@ from matplotlib.lines import Line2D
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+#from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from sklearn.metrics import roc_auc_score, mean_squared_error, mean_absolute_error
+
+import dgl
 
 from dataset.dataset_test import MolTestDatasetWrapper
 from dataset.dataset_clique import MolCliqueDatasetWrapper
@@ -43,27 +44,23 @@ def _save_config_file(model_checkpoints_folder):
         os.makedirs(model_checkpoints_folder)
         shutil.copy('./config_finetune.yaml', os.path.join(model_checkpoints_folder, 'config_finetune.yaml'))
 
+def _gen_clique_to_mol(clique_list, mol_to_clique):
+    clique_to_mol = defaultdict(list)
+    for mol in mol_to_clique:
+        for clique in mol_to_clique[mol]:
+            clique_to_mol[clique_list.index(clique)].append(mol)
+    return clique_to_mol
+
+def _get_training_molecules(train_loader):
+    train_mol = []
+    for data in train_loader:
+        for d in data.to_data_list():
+            train_mol.append(d.mol_index.item())
+    return train_mol
+
+
 def _ortho_constraint(device, prompt):
     return torch.norm(torch.mm(prompt, prompt.T) - torch.eye(prompt.shape[0]).to(device))
-
-#def _ortho_constraint(device, prompt):
-#    p = prompt.detach().clone()
-#    cols = prompt.shape[1]
-#    rows = prompt.shape[0]
-#    w1 = p.view(-1, cols)
-#    wt = torch.transpose(w1, 0, 1)
-#    m = torch.matmul(wt, w1)
-#    identity = torch.eye(cols, device=device)
-#
-#    w_tmp = (m - identity)
-#    height = w_tmp.size(0)
-#    u = F.normalize(w_tmp.new_empty(height).normal_(0,1), dim=0, eps=1e-12)
-#    v = F.normalize(torch.matmul(w_tmp.T, u), dim=0, eps=1e-12)
-#    u = F.normalize(torch.matmul(w_tmp, v), dim=0, eps=1e-12)
-#    sigma = torch.dot(u, torch.matmul(w_tmp, v))
-#
-#    return (torch.norm(sigma, 2))**2
-
 
 class Normalizer(object):
     """Normalize a Tensor and restore it later. """
@@ -96,7 +93,6 @@ class FineTune(object):
         current_time = datetime.now().strftime('%b%d_%H-%M-%S')
         dir_name = current_time + '_' + config['task_name']
         self.log_dir = os.path.join('finetune', dir_name)
-
         self.dataset = dataset
         if config['dataset']['task'] == 'classification':
             self.criterion = NTXentLoss(self.device, config['batch_size'], **config['loss'])
@@ -111,13 +107,12 @@ class FineTune(object):
 
         return device
 
-    def _step(self, model, data, n_iter, cluster_idx, epoch=float('inf')):   
+    def _step(self, model, data, n_iter, mol_idx, clique_idx, cluster_idx, epoch=float('inf')):   
         # get the prediction
-        preds, embs = model(data, cluster_idx)
-
+        preds, embs = model(data, mol_idx, clique_idx, cluster_idx, self.device)
         if self.config['dataset']['task'] == 'classification':
             # normalize projection feature vectors
-            preds = F.normalize(preds, dim=1)
+            # preds = F.normalize(preds, dim=1)
             embs = F.normalize(embs, dim=1)
 
             loss = self.criterion(preds, embs)
@@ -125,18 +120,53 @@ class FineTune(object):
 
         return loss
 
-    def _extract_clusters(self, batch, mol_to_cluster):
-        cluster_idx = []
-        for d in batch.to_data_list():
-            if d.y.item() == 0:
-                idx = mol_to_cluster[d.mol_index.item()]
-            elif d.y.item() == 1:
-                idx = self.config['num_clusters'] + mol_to_cluster[d.mol_index.item()]
-            cluster_idx.append(idx)
+    def _gen_cliques(self, smiles_data):
+        mol_to_clique = {}
+        clique_set = set()
+        if self.config['vocab'] == 'mgssl':
+            for i, m in enumerate(smiles_data):
+                mol_to_clique[i] = {}
+                mol = clique.get_mol(m)
+                cliques, edges = clique.brics_decomp(mol)
+                if len(edges) <= 1:
+                    cliques, edges = clique.tree_decomp(mol)
+                for c in cliques:
+                    cmol = clique.get_clique_mol(mol, c)
+                    cs = clique.get_smiles(cmol)
+                    clique_set.add(cs)
+                    if cs not in mol_to_clique[i]:
+                        mol_to_clique[i][cs] = 1
+                    else:
+                        mol_to_clique[i][cs] += 1
+        elif self.config['vocab'] == 'junction':
+            for i, m in enumerate(smiles_data):
+                mol_to_clique[i] = {}
+                mol = vocab.get_mol(m)
+                cliques, edges = vocab.tree_decomp(mol)
+                for c in cliques:
+                    cmol = vocab.get_clique_mol(mol, c)
+                    cs = vocab.get_smiles(cmol)
+                    clique_set.add(cs)
+                    if cs not in mol_to_clique[i]:
+                        mol_to_clique[i][cs] = 1
+                    else:
+                        mol_to_clique[i][cs] += 1
+        elif self.config['vocab'] == 'brics':
+            for i, m in enumerate(smiles_data):
+                mol_to_clique[i] = {}
+                mol = vocab.get_mol(m)
+                cliques, edges = clique.simple_brics_decomp(mol)
+                for c in cliques:
+                    cmol = clique.get_clique_mol(mol, c)
+                    cs = clique.get_smiles(cmol)
+                    clique_set.add(cs)
+                    if cs not in mol_to_clique[i]:
+                        mol_to_clique[i][cs] = 1
+                    else:
+                        mol_to_clique[i][cs] += 1
 
-        cluster_idx = torch.tensor(cluster_idx).to(self.device)
         
-        return cluster_idx
+        return list(clique_set), mol_to_clique
 
     def _gen_clusters(self):
         full_data_loader = self.dataset.get_full_data_loader()
@@ -153,35 +183,119 @@ class FineTune(object):
                     cluster_idx_1 = (cluster_idx_1 + 1) % self.config['num_clusters']
         return mol_to_cluster
 
+    def _filter_cliques(self, threshold, train_loader, clique_list, mol_to_clique, clique_to_mol):
+        train_mol = _get_training_molecules(train_loader)
+        
+        fil_clique_list = []
+        for i, d in enumerate(clique_list):
+            if sum(mol in train_mol for mol in clique_to_mol[i]) <= threshold:
+                fil_clique_list.append(d)
+        
+        tmol_to_clique = deepcopy(mol_to_clique)
+        for mol in mol_to_clique:
+            for clique in mol_to_clique[mol].keys():
+                if clique in fil_clique_list:
+                    if self.config['init'] == 'uniform':
+                        tmol_to_clique[mol]['EMP'] = 1
+                    del tmol_to_clique[mol][clique]
+        
+        mol_to_clique = deepcopy(tmol_to_clique)
+        emp_mol = []
+        for mol in tmol_to_clique:
+            if self.config['init'] == 'uniform':
+                if all('EMP' in clique for clique in tmol_to_clique[mol].keys()):
+                    emp_mol.append(mol)
+            elif self.config['init'] == 'zeros':
+                if len(tmol_to_clique[mol]) == 0:
+                    mol_to_clique[mol]['EMP'] = 1
+                    emp_mol.append(mol)
+
+        clique_list = list(set(clique_list) - set(fil_clique_list))
+        return emp_mol, clique_list, mol_to_clique
+
+    def _extract_train_cliques(self, batch, mol_to_clique, clique_list):
+        mol_idx = []
+        clique_idx = []
+        for i, d in enumerate(batch.to_data_list()):
+            for clique in mol_to_clique[d.mol_index.item()].keys():
+                mol_idx.append(i)
+                clique_idx.append(clique_list.index(clique))
+
+        mol_idx = torch.tensor(mol_idx).to(self.device)
+        clique_idx = torch.tensor(clique_idx).to(self.device)
+
+        #motif_samples = motif_embed(clique_idx).to(self.device)
+
+        #return mol_idx, motif_samples
+        return mol_idx, clique_idx
+
+    def _extract_test_cliques(self, batch, mol_to_clique, clique_list):
+        mol_idx = []
+        clique_idx = []
+        for i, d in enumerate(batch.to_data_list()):
+            for clique in mol_to_clique[d.mol_index.item()].keys():
+                mol_idx.append(i)
+                clique_idx.append(clique_list.index(clique))
+
+        mol_idx = torch.tensor(mol_idx).to(self.device)
+        clique_idx = torch.tensor(clique_idx).to(self.device)
+
+        #motif_samples = motif_emb_tensor.index_select(0, clique_idx).to(self.device)
+        
+        #return mol_idx, motif_samples
+        return mol_idx, clique_idx
+
+    def _extract_clusters(self, batch, mol_to_cluster):
+        cluster_idx = []
+        for d in batch.to_data_list():
+            if d.y.item() == 0:
+                idx = mol_to_cluster[d.mol_index.item()]
+            elif d.y.item() == 1:
+                idx = self.config['num_clusters'] + mol_to_cluster[d.mol_index.item()]
+            cluster_idx.append(idx)
+
+        cluster_idx = torch.tensor(cluster_idx).to(self.device)
+        
+        return cluster_idx
+
     def train(self):
         smiles_data, dropped_train_loader, train_loader, valid_loader, test_loader = self.dataset.get_data_loaders()
+        #full_data_loader = self.dataset.get_full_data_loader()
 
-        if self.config['task_name'] == 'MUV':
-            labels = []
-            for d in train_loader:
-                labels.append(d.y)
-            labels = torch.cat(labels)
-            if len(torch.unique(labels)) < 2:
-                self.roc_auc = 1.
-                return
-            labels = []
-            for d in valid_loader:
-                labels.append(d.y)
-            labels = torch.cat(labels)
-            if len(torch.unique(labels)) < 2:
-                self.roc_auc = 1.
-                return
-            labels = []
-            for d in test_loader:
-                labels.append(d.y)
-            labels = torch.cat(labels)
-            if len(torch.unique(labels)) < 2:
-                self.roc_auc = 1.
-                return
+        labels = []
+        for d in train_loader:
+            labels.append(d.y)
+        labels = torch.cat(labels)
+        if len(torch.unique(labels)) < 2:
+            self.roc_auc = 0.
+            return
+        labels = []
+        for d in valid_loader:
+            labels.append(d.y)
+        labels = torch.cat(labels)
+        if len(torch.unique(labels)) < 2:
+            self.roc_auc = 0.
+            return
+        labels = []
+        for d in test_loader:
+            labels.append(d.y)
+        labels = torch.cat(labels)
+        if len(torch.unique(labels)) < 2:
+            self.roc_auc = 0.
+            return
 
         mol_to_cluster = self._gen_clusters()
 
+        clique_list, mol_to_clique = self._gen_cliques(smiles_data)
+        clique_to_mol = _gen_clique_to_mol(clique_list, mol_to_clique)
+        emp_mol, clique_list, mol_to_clique = self._filter_cliques(self.config['threshold'], train_loader, clique_list, mol_to_clique, clique_to_mol)
+        num_motifs = len(clique_list) + 1
+
+        clique_dataset = MolCliqueDatasetWrapper(clique_list, num_motifs, self.config['dataset']['num_workers'])
+        clique_loader = clique_dataset.get_data_loaders()
+
         self.normalizer = None
+      
         if self.config["task_name"] in ['qm7', 'qm9']:
             labels = []
             for d, __ in train_loader:
@@ -195,17 +309,43 @@ class FineTune(object):
             model = GINet(feat_dim = self.config['model']['feat_dim']).to(self.device)
             #model = GINet(self.config['dataset']['task'], **self.config["model"]).to(self.device)
             model = self._load_pre_trained_weights(model)
-            
+
             with torch.no_grad():
+                motif_feats = []
+                for c in clique_loader:
+                    c = c.to(self.device)
+                    __, emb = model(c)
+                    motif_feats.append(emb)
+            
+                motif_feats = torch.cat(motif_feats)
+
+                clique_list.append("EMP")
+
+                dummy_motif = torch.zeros((1, motif_feats.shape[1])).to(self.device)
+                if self.config['init'] == 'uniform':
+                    nn.init.xavier_uniform_(dummy_motif)
+                
+                motif_feats = torch.cat((motif_feats, dummy_motif), dim=0)
+
                 label_feats = []
                 labels = []
-                
+                clique_idx_0 = []
+                clique_idx_1 = []
                 for batch in train_loader:
                     batch = batch.to(self.device)
+
                     feat_emb, out_emb = model(batch)
                     label_feats.append(out_emb)
                     labels.append(batch.y)
 
+                    for i, d in enumerate(batch.to_data_list()):
+                        if d.y.item() == 0:
+                            for clique in mol_to_clique[d.mol_index.item()].keys():
+                                clique_idx_0.append(clique_list.index(clique))
+                        elif d.y.item() == 1:
+                            for clique in mol_to_clique[d.mol_index.item()].keys():
+                                clique_idx_1.append(clique_list.index(clique))
+
                 label_feats = torch.cat(label_feats)
                 labels = torch.cat(labels)
 
@@ -213,54 +353,33 @@ class FineTune(object):
                 linit1 = torch.mean(label_feats[torch.nonzero(labels == 1)[:, 0]], dim=0)
 
                 label_feats = torch.vstack((linit0, linit1)).to(self.device)
+                        
+                clique_idx_0 = torch.tensor(clique_idx_0)
+                clique_idx_1 = torch.tensor(clique_idx_1)
 
+                clique_feats_0 = torch.index_select(motif_feats, 0, clique_idx_0.to(self.device))
+                clique_feats_0 = clique_feats_0.mean(dim=0, keepdim=True)
+                clique_feats_1 = torch.index_select(motif_feats, 0, clique_idx_1.to(self.device))
+                clique_feats_1 = clique_feats_1.mean(dim=0, keepdim=True)
+                clique_feats = torch.vstack((clique_feats_0, clique_feats_1)).to(self.device)
+
+                label_feats = torch.cat((label_feats, clique_feats), dim=1).to(self.device)
                 cluster_indices = [0 for i in range(self.config['num_clusters'])]
                 cluster_indices.extend([1 for i in range(self.config['num_clusters'])])
 
                 label_feats = torch.index_select(label_feats, 0, torch.tensor(cluster_indices).to(self.device))
+                label_feats = F.normalize(label_feats, dim=1)
 
-            from models.ginet_finetune_link import GINet
-            model = GINet(self.config['dataset']['task'], self.config['cluster_mode'], self.config['num_clusters'], **self.config["model"]).to(self.device)
+            from models.ginet_finetune_mp_link import GINet
+            model = GINet(num_motifs, self.config['dataset']['task'], self.config['cluster_mode'], self.config['num_clusters'], **self.config["model"]).to(self.device)
             model = self._load_pre_trained_weights(model)
+            model.init_clique_emb(motif_feats)
             model.init_label_emb(label_feats)
-        elif self.config['model_type'] == 'gcn':
-            from models.gcn_molclr import GCN
-            model = GCN(feat_dim = self.config['model']['feat_dim']).to(self.device)
-            model = self._load_pre_trained_weights(model)
-
-            with torch.no_grad():
-                label_feats = []
-                labels = []
-                for d in train_loader:
-                    d = d.to(self.device)
-                    feat_emb, out_emb = model(d)
-                    label_feats.append(out_emb)
-                    labels.append(d.y)
-
-                label_feats = torch.cat(label_feats)
-                labels = torch.cat(labels)
-
-                linit0 = torch.mean(label_feats[torch.nonzero(labels == 0)[:, 0]], dim=0)
-                linit1 = torch.mean(label_feats[torch.nonzero(labels == 1)[:, 0]], dim=0)
-
-                label_feats = torch.vstack((linit0, linit1)).to(self.device)
-
-            from models.gcn_finetune_link import GCN
-            model = GCN(self.config['dataset']['task'], **self.config['model']).to(self.device)
-            model = self._load_pre_trained_weights(model)
-            model.init_label_emb(label_feats)
-
-        layer_list = []
-        for name, param in model.named_parameters():
-            if 'out_lin' in name or 'prompt' in name:
-                layer_list.append(name)
-
-        params = list(map(lambda x: x[1],list(filter(lambda kv: kv[0] in layer_list, model.named_parameters()))))
-        base_params = list(map(lambda x: x[1],list(filter(lambda kv: kv[0] not in layer_list, model.named_parameters()))))
+        else:
+            raise ValueError('Unsupported model type.')
 
         optimizer = torch.optim.Adam(
-                [{'params': base_params, 'lr': self.config['init_base_lr']}, {'params': params}],
-                self.config['init_lr'], weight_decay=self.config['weight_decay']
+            filter(lambda p: p.requires_grad, model.parameters()), lr=self.config['init_lr'], weight_decay = self.config['weight_decay']
         )
 
         model_checkpoints_folder = os.path.join(self.log_dir, 'checkpoints')
@@ -281,12 +400,12 @@ class FineTune(object):
         for epoch_counter in range(self.config['epochs']):
             for bn, data in enumerate(dropped_train_loader):
                 optimizer.zero_grad()
-
                 data = data.to(self.device)
+            
+                mol_idx, clique_idx = self._extract_train_cliques(data, mol_to_clique, clique_list)
+                cluster_idx = self._extract_clusters(data, mol_to_cluster)  
 
-                cluster_idx = self._extract_clusters(data, mol_to_cluster)
-
-                loss = self._step(model, data, n_iter, cluster_idx, epoch=epoch_counter)
+                loss = self._step(model, data, n_iter, mol_idx, clique_idx, cluster_idx, epoch=epoch_counter)
 
                 if apex_support and self.config['fp16_precision']:
                     with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -300,21 +419,19 @@ class FineTune(object):
             # validate the model if requested
             if epoch_counter % self.config['eval_every_n_epochs'] == 0:
                 if self.config['dataset']['task'] == 'classification': 
-                    valid_cls = self._validate(model, valid_loader, mol_to_cluster) 
+                    valid_cls = self._validate(model, valid_loader, clique_list, mol_to_clique, mol_to_cluster)
                     ret_val.append(valid_cls)
                     if valid_cls > best_valid_cls:
                         # save the model weights
                         best_valid_cls = valid_cls
                         torch.save(model.state_dict(), os.path.join(model_checkpoints_folder, 'model.pth'))
-
+                
+                #self.writer.add_scalar('validation_loss', valid_loss, global_step=valid_n_iter)
                 valid_n_iter += 1
 
-        self._test(model, test_loader, mol_to_cluster)
+        self._test(model, test_loader, clique_list, mol_to_clique, mol_to_cluster)
         print(self.roc_auc)
         self.roc_auc = sum(ret_val) / len(ret_val)
-        # print("Average validation ROC-AUC: ", self.roc_auc)
-        #self.roc_auc = best_valid_cls
-        #print("Best validation ROC-AUC: ", self.roc_auc)
 
     def _load_pre_trained_weights(self, model):
         try:
@@ -328,51 +445,34 @@ class FineTune(object):
 
         return model
 
-    def _validate(self, model, valid_loader, mol_to_cluster):
+    def _validate(self, model, valid_loader, clique_list, mol_to_clique, mol_to_cluster):
         predictions = []
         labels = []
         with torch.no_grad():
             model.eval()
 
-            num_data = 0
             for bn, data in enumerate(valid_loader):
                 data = data.to(self.device)
 
+                mol_idx, clique_idx = self._extract_test_cliques(data, mol_to_clique, clique_list)
                 cluster_idx = self._extract_clusters(data, mol_to_cluster)
 
-                preds, __ = model(data, cluster_idx)
+                preds, __ = model(data,mol_idx, clique_idx, cluster_idx, self.device)
 
                 if self.config['dataset']['task'] == 'classification':
-                    if self.config['cluster_mode'] == 'fixed_assign':
-                        preds = F.normalize(preds, dim=1)
-                        embs = model.get_label_emb()
-                        embs = F.normalize(embs, dim=1)
+                    preds = F.normalize(preds, dim=1)
+                    embs = model.get_label_emb()
+                    embs = F.normalize(embs, dim=1)
+                    emb_0 = torch.index_select(embs, 0, torch.tensor([i for i in range(self.config['num_clusters'])]).to(self.device))
+                    emb_0 = emb_0.mean(dim=0, keepdim=True)
+                    emb_0 = F.normalize(emb_0, dim=1)
+                    emb_1 = torch.index_select(embs, 0, torch.tensor([self.config['num_clusters'] + i for i in range(self.config['num_clusters'])]).to(self.device))
+                    emb_1 = emb_1.mean(dim=0, keepdim=True)
+                    emb_1 = F.normalize(emb_1, dim=1)
+                    embs = torch.cat((emb_0, emb_1), dim=0)
 
-                        new_cluster_idx = cluster_idx.clone()
-                        new_cluster_idx[new_cluster_idx > self.config['num_clusters'] - 1] -= self.config['num_clusters']
-
-                        pred = torch.empty((data.num_graphs, 2)).to(self.device)
-                        for i in range(self.config['num_clusters']):
-                            num_i = torch.count_nonzero(new_cluster_idx == i).item()
-                            if num_i > 0:
-                                new_preds = preds[new_cluster_idx == i, :]
-                                new_embs = torch.cat((embs[i].unsqueeze(0), embs[self.config['num_clusters']].unsqueeze(0)), dim=0)
-                                similarities = torch.mm(new_preds, new_embs.T)
-                                pred[new_cluster_idx == i, :] = F.softmax(similarities, dim=-1)
-                    else:
-                        preds = F.normalize(preds, dim=1)
-                        embs = model.get_label_emb()
-                        embs = F.normalize(embs, dim=1)
-                        emb_0 = torch.index_select(embs, 0, torch.tensor([i for i in range(self.config['num_clusters'])]).to(self.device))
-                        emb_0 = emb_0.mean(dim=0, keepdim=True)
-                        emb_0 = F.normalize(emb_0, dim=1)
-                        emb_1 = torch.index_select(embs, 0, torch.tensor([self.config['num_clusters'] + i for i in range(self.config['num_clusters'])]).to(self.device))
-                        emb_1 = emb_1.mean(dim=0, keepdim=True)
-                        emb_1 = F.normalize(emb_1, dim=1)
-                        embs = torch.cat((emb_0, emb_1), dim=0)
-
-                        similarities = torch.mm(preds, embs.T)
-                        pred= F.softmax(similarities, dim=-1)
+                    similarities = torch.mm(preds, embs.T)
+                    pred= F.softmax(similarities, dim=-1)
 
                 if self.device == 'cpu':
                     predictions.extend(pred.detach().numpy())
@@ -380,17 +480,16 @@ class FineTune(object):
                 else:
                     predictions.extend(pred.cpu().detach().numpy())
                     labels.extend(data.y.cpu().flatten().numpy())
-
         
         model.train()
 
         if self.config['dataset']['task'] == 'classification': 
             predictions = np.array(predictions)
             labels = np.array(labels)
-            roc_auc = roc_auc_score(labels, predictions[:, 1])
+            roc_auc = roc_auc_score(labels, predictions[:,1])
             return roc_auc
 
-    def _test(self, model, valid_loader, mol_to_cluster):
+    def _test(self, model, valid_loader, clique_list, mol_to_clique, mol_to_cluster):
         model_path = os.path.join(self.log_dir, 'checkpoints', 'model.pth')
         state_dict = torch.load(model_path, map_location=self.device)
         model.load_state_dict(state_dict)
@@ -402,45 +501,28 @@ class FineTune(object):
         with torch.no_grad():
             model.eval()
 
-            num_data = 0
             for bn, data in enumerate(valid_loader):
                 data = data.to(self.device)
 
+                mol_idx, clique_idx = self._extract_test_cliques(data, mol_to_clique, clique_list)
                 cluster_idx = self._extract_clusters(data, mol_to_cluster)
 
-                preds, __ = model(data, cluster_idx)
+                preds, __ = model(data, mol_idx, clique_idx, cluster_idx, self.device)
 
                 if self.config['dataset']['task'] == 'classification':
-                    if self.config['cluster_mode'] == 'fixed_assign':
-                        preds = F.normalize(preds, dim=1)
-                        embs = model.get_label_emb()
-                        embs = F.normalize(embs, dim=1)
+                    # preds = F.normalize(preds, dim=1)
+                    embs = model.get_label_emb()
+                    embs = F.normalize(embs, dim=1)
+                    emb_0 = torch.index_select(embs, 0, torch.tensor([i for i in range(self.config['num_clusters'])]).to(self.device))
+                    emb_0 = emb_0.mean(dim=0, keepdim=True)
+                    emb_0 = F.normalize(emb_0, dim=1)
+                    emb_1 = torch.index_select(embs, 0, torch.tensor([self.config['num_clusters'] + i for i in range(self.config['num_clusters'])]).to(self.device))
+                    emb_1 = emb_1.mean(dim=0, keepdim=True)
+                    emb_1 = F.normalize(emb_1, dim=1)
+                    embs = torch.cat((emb_0, emb_1), dim=0)
 
-                        new_cluster_idx = cluster_idx.clone()
-                        new_cluster_idx[new_cluster_idx > self.config['num_clusters'] - 1] -= self.config['num_clusters']
-
-                        pred = torch.empty((data.num_graphs, 2)).to(self.device)
-                        for i in range(self.config['num_clusters']):
-                            num_i = torch.count_nonzero(new_cluster_idx == i).item()
-                            if num_i > 0:
-                                new_preds = preds[new_cluster_idx == i, :]
-                                new_embs = torch.cat((embs[i].unsqueeze(0), embs[self.config['num_clusters']].unsqueeze(0)), dim=0)
-                                similarities = torch.mm(new_preds, new_embs.T)
-                                pred[new_cluster_idx == i, :] = F.softmax(similarities, dim=-1)
-                    else:
-                        preds = F.normalize(preds, dim=1)
-                        embs = model.get_label_emb()
-                        embs = F.normalize(embs, dim=1)
-                        emb_0 = torch.index_select(embs, 0, torch.tensor([i for i in range(self.config['num_clusters'])]).to(self.device))
-                        emb_0 = emb_0.mean(dim=0, keepdim=True)
-                        emb_0 = F.normalize(emb_0, dim=1)
-                        emb_1 = torch.index_select(embs, 0, torch.tensor([self.config['num_clusters'] + i for i in range(self.config['num_clusters'])]).to(self.device))
-                        emb_1 = emb_1.mean(dim=0, keepdim=True)
-                        emb_1 = F.normalize(emb_1, dim=1)
-                        embs = torch.cat((emb_0, emb_1), dim=0)
-
-                        similarities = torch.mm(preds, embs.T)
-                        pred= F.softmax(similarities, dim=-1)
+                    similarities = torch.mm(preds, embs.T)
+                    pred= F.softmax(similarities, dim=-1)
 
                 if self.device == 'cpu':
                     predictions.extend(pred.detach().numpy())
@@ -454,9 +536,10 @@ class FineTune(object):
         if self.config['dataset']['task'] == 'classification': 
             predictions = np.array(predictions)
             labels = np.array(labels)
-            self.roc_auc = roc_auc_score(labels, predictions[:, 1])
+            self.roc_auc = roc_auc_score(labels, predictions[:,1])
 
-def main(config):
+def main(config, run):
+    #torch.manual_seed(42)
     dataset = MolTestDatasetWrapper(config['batch_size'], **config['dataset'])
 
     fine_tune = FineTune(dataset, config)
@@ -568,7 +651,7 @@ if __name__ == "__main__":
 
     print(config)
 
-    for _ in range(10):
+    for run in range(10):
         for target in target_list:
             config['dataset']['target'] = target
-            result = main(config)
+            result = main(config, run)
