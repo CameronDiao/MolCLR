@@ -363,12 +363,12 @@ class FineTune(object):
                 clique_feats_1 = clique_feats_1.mean(dim=0, keepdim=True)
                 clique_feats = torch.vstack((clique_feats_0, clique_feats_1)).to(self.device)
 
-                label_feats = torch.cat((label_feats, clique_feats), dim=1).to(self.device)
+                label_feats = label_feats + clique_feats
                 cluster_indices = [0 for i in range(self.config['num_clusters'])]
                 cluster_indices.extend([1 for i in range(self.config['num_clusters'])])
 
                 label_feats = torch.index_select(label_feats, 0, torch.tensor(cluster_indices).to(self.device))
-                label_feats = F.normalize(label_feats, dim=1)
+                # label_feats = F.normalize(label_feats, dim=1)
 
             from models.ginet_finetune_mp_link import GINet
             model = GINet(num_motifs, self.config['dataset']['task'], self.config['cluster_mode'], self.config['num_clusters'], **self.config["model"]).to(self.device)
@@ -460,7 +460,7 @@ class FineTune(object):
                 preds, __ = model(data,mol_idx, clique_idx, cluster_idx, self.device)
 
                 if self.config['dataset']['task'] == 'classification':
-                    preds = F.normalize(preds, dim=1)
+                    # preds = F.normalize(preds, dim=1)
                     embs = model.get_label_emb()
                     embs = F.normalize(embs, dim=1)
                     emb_0 = torch.index_select(embs, 0, torch.tensor([i for i in range(self.config['num_clusters'])]).to(self.device))

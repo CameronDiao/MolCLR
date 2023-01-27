@@ -460,7 +460,7 @@ class GINet(nn.Module):
         batch = F.dropout(batch, self.dec_dropout, training=self.training)
         hp = batch.squeeze(1)
 
-        hp = torch.cat((h, hp), dim=1)
+        hp = h + hp
         if self.conc_ln:
             hp = self.conc_norm1(hp)
         else:
